@@ -1,0 +1,18 @@
+streamlit>=1.31.0
+openai>=1.10.0
+python-dotenv>=1.0.0
+
+# 웹 스크래핑 (텍스트 추출)
+requests>=2.31.0
+beautifulsoup4>=4.12.3
+lxml>=5.1.0
+
+# Whisper ASR (오디오 처리)
+transformers>=4.36.2
+torch>=2.1.2
+accelerate>=0.25.0
+soundfile>=0.12.1
+librosa>=0.10.0
+
+# 유튜브 자막 추출
+youtube-transcript-api>=0.6.0
