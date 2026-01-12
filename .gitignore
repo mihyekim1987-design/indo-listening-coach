@@ -106,6 +106,22 @@ learning_history.json
 secrets.toml
 api_keys.txt
 
-# Sample audio (keep locally, don't commit)
-sample_*.wav
-
+# Audio assets (keep locally, don't commit)
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.ogg
+*.oga
+*.opus
+*.flac
+*.aiff
+*.aif
+*.aifc
+*.caf
+*.wma
+*.amr
+*.mka
+*.mp4
+*.mov
+*.webm
