@@ -1,6 +1,7 @@
 streamlit>=1.31.0
 openai>=1.10.0
 python-dotenv>=1.0.0
+pydantic>=2.0.0
 
 # 웹 스크래핑 (텍스트 추출)
 requests>=2.31.0
@@ -16,3 +17,10 @@ librosa>=0.10.0
 
 # 유튜브 자막 추출
 youtube-transcript-api>=0.6.0
+
+# TTS (Text-to-Speech)
+edge-tts>=6.1.9
+pydub>=0.25.1
+
+# Google Cloud TTS (선택사항 - API 키가 있을 때만 사용)
+# google-cloud-texttospeech>=2.14.1

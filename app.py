@@ -27,6 +27,10 @@ from bs4 import BeautifulSoup
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 import streamlit.components.v1 as components
+import asyncio
+import edge_tts
+import hashlib
+from pathlib import Path
 
 # OpenAI 설정
 load_dotenv()
@@ -40,7 +44,7 @@ from typing import Dict, List, Optional
 # 프롬프트 불러오기
 import prompts as P
 
-missing = [name for name in ["QUIZ_PROMPT", "COACH_PROMPT", "EDUCATIONAL_ANALYSIS_PROMPT"] if not hasattr(P, name)]
+missing = [name for name in ["QUIZ_PROMPT", "COACH_PROMPT", "EDUCATIONAL_ANALYSIS_PROMPT", "AI_LEARNING_COACH_PROMPT"] if not hasattr(P, name)]
 if missing:
     raise ImportError(
         f"[prompts import check] Missing: {missing}\n"
@@ -51,6 +55,7 @@ if missing:
 QUIZ_PROMPT = P.QUIZ_PROMPT
 COACH_PROMPT = P.COACH_PROMPT
 EDUCATIONAL_ANALYSIS_PROMPT = P.EDUCATIONAL_ANALYSIS_PROMPT
+AI_LEARNING_COACH_PROMPT = P.AI_LEARNING_COACH_PROMPT
 
 
 # 상수 정의
@@ -59,6 +64,10 @@ MODEL_ID = "Sparkplugx1904/whisper-base-id"
 TARGET_SR = 16000
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
+
+# TTS 캐시 디렉토리
+TTS_CACHE_DIR = os.path.join(LOG_DIR, "tts_cache")
+os.makedirs(TTS_CACHE_DIR, exist_ok=True)
 
 # 샘플 링크
 SAMPLE_LINKS = {
@@ -75,6 +84,7 @@ CEFR_CATEGORIES = {
     "vocabulary": {
         "name": "어휘 (Kosakata)",
         "icon": "📚",
+        "description": "인도네시아어 단어의 의미와 사용법을 이해하는 능력입니다. 기본 단어부터 격식 어휘, 접두사/접미사까지 포함합니다.",
         "keywords": ["arti", "makna", "kata", "kosakata", "어휘", "단어", "뜻", "의미"],
         "subcategories": {
             "basic_words": "기본 단어",
@@ -88,6 +98,7 @@ CEFR_CATEGORIES = {
     "grammar": {
         "name": "문법 (Tata Bahasa)",
         "icon": "📝",
+        "description": "인도네시아어 문법 구조와 접사 체계를 이해하는 능력입니다. 수동태, 사역형, 시제 표현 등이 포함됩니다.",
         "keywords": ["di-", "ter-", "me-", "ber-", "-kan", "접사", "수동", "문법", "시제"],
         "subcategories": {
             "tense": "시제 (sudah, akan, sedang)",
@@ -102,6 +113,7 @@ CEFR_CATEGORIES = {
     "politeness": {
         "name": "경어/존칭 (Kesopanan)",
         "icon": "🎩",
+        "description": "격식체, 존칭, 요청 표현 등 인도네시아어의 예의 표현을 이해하고 사용하는 능력입니다.",
         "keywords": ["bapak", "ibu", "pak", "bu", "존칭", "경어", "tolong", "mohon"],
         "subcategories": {
             "formal_register": "격식체",
@@ -113,6 +125,7 @@ CEFR_CATEGORIES = {
     "comprehension": {
         "name": "독해/이해 (Pemahaman)",
         "icon": "🔍",
+        "description": "텍스트의 중심 내용, 세부 정보를 파악하고 문맥을 통해 추론하는 능력입니다.",
         "keywords": ["utama", "pokok", "중심", "주제", "내용", "이해"],
         "subcategories": {
             "main_idea": "중심 내용 파악",
@@ -124,6 +137,7 @@ CEFR_CATEGORIES = {
     "numbers": {
         "name": "숫자/수량 (Angka)",
         "icon": "🔢",
+        "description": "인도네시아어의 기수, 서수, 수량 표현을 이해하고 사용하는 능력입니다.",
         "keywords": ["berapa", "jumlah", "angka", "숫자", "몇", "수량"],
         "subcategories": {
             "cardinal": "기수",
@@ -134,6 +148,7 @@ CEFR_CATEGORIES = {
     "time": {
         "name": "시간 표현 (Waktu)",
         "icon": "⏰",
+        "description": "시계 시간, 날짜, 기간 등 시간과 관련된 표현을 이해하고 사용하는 능력입니다.",
         "keywords": ["kapan", "waktu", "tanggal", "jam", "시간", "날짜", "언제"],
         "subcategories": {
             "clock_time": "시계 시간",
@@ -654,6 +669,18 @@ def reset_learning_state(source_type: str, source_id: str = None):
 # 3. LLM 호출 (OpenAI API)
 # =====================================================
 
+def safe_prompt_fill(template: str, **kwargs) -> str:
+    """
+    안전한 프롬프트 치환 함수.
+    - str.format()을 쓰지 않아서, 프롬프트 내부의 JSON 예시 { } 때문에 KeyError가 나는 문제를 방지합니다.
+    - {key} 형태로 들어있는 것만 치환합니다.
+    """
+    out = template
+    for k, v in kwargs.items():
+        token = "{" + k + "}"
+        out = out.replace(token, "" if v is None else str(v))
+    return out
+
 def llm_json(prompt: str, model: str = "gpt-4o-mini") -> dict:
     """
     OpenAI API를 호출하여 JSON 형식의 응답을 받습니다.
@@ -757,10 +784,52 @@ class CoachResponse(BaseModel):
     weak_points_ko: List[str]
     tomorrow_plan_10min_ko: List[TomorrowPlanStep]
     shadowing_sentences: List[ShadowingSentence]
-    
+
+
 def llm_structured(prompt: str, response_model, model: str = "gpt-4o-mini"):
-    """OpenAI Structured Outputs를 사용하여 스키마에 맞는 응답을 받습니다."""
-    # ... 함수 본문
+    """
+    OpenAI Structured Outputs를 사용하여 스키마에 맞는 응답을 받습니다.
+    
+    Args:
+        prompt: 프롬프트 텍스트
+        response_model: Pydantic BaseModel 클래스
+        model: 사용할 모델
+    
+    Returns:
+        dict: Pydantic 모델을 딕셔너리로 변환한 결과
+    """
+    try:
+        completion = client.beta.chat.completions.parse(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are an Indonesian language learning coach. Return structured output that matches the schema."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format=response_model,
+            temperature=0.3,
+        )
+        
+        parsed_response = completion.choices[0].message.parsed
+        
+        # None 체크
+        if parsed_response is None:
+            raise ValueError("LLM returned empty response (parsed is None)")
+        
+        # 디버그용: 원문 응답 저장
+        if "last_llm_response" not in st.session_state:
+            st.session_state["last_llm_response"] = {}
+        st.session_state["last_llm_response"]["parsed"] = parsed_response.model_dump()
+        st.session_state["last_llm_response"]["model"] = response_model.__name__
+        
+        return parsed_response.model_dump()
+        
+    except Exception as e:
+        # 디버그용: 에러 저장
+        if "last_llm_response" not in st.session_state:
+            st.session_state["last_llm_response"] = {}
+        st.session_state["last_llm_response"]["error"] = str(e)
+        raise
+
 
 # =====================================================
 # 3-3. 취약점 분석 시스템
@@ -903,16 +972,22 @@ class RepeatLearningManager:
         state["total_retries"] = 0
         state["active"] = True
         
+        # balloons 플래그 초기화
+        if "repeat_learning_balloons_shown" in st.session_state:
+            del st.session_state["repeat_learning_balloons_shown"]
+        
         # quiz_questions를 딕셔너리로 변환
         q_dict = {str(q.get("id")): q for q in quiz_questions}
         
         for item in wrong_items:
-            q_id = str(item.get("id"))
+            # id 또는 question_id 필드 확인
+            q_id = str(item.get("id") or item.get("question_id", ""))
             full_question = q_dict.get(q_id, {})
             
             # 원본 문제 정보에 오답 정보 추가
             question_data = {
                 **full_question,
+                "id": q_id,  # ID 명시적으로 설정
                 "user_wrong_answer": item.get("user_answer", ""),
                 "evidence_quote": item.get("evidence_quote", full_question.get("evidence_quote", "")),
                 "why_correct_ko": item.get("why_correct_ko", ""),
@@ -1007,7 +1082,10 @@ class RepeatLearningManager:
         """모든 문제 완료 여부"""
         cls.init_state()
         state = st.session_state[cls.SESSION_KEY]
-        return len(state["wrong_queue"]) == 0 and len(state["completed"]) > 0
+        # active 상태이고, wrong_queue가 비어있고, completed가 있을 때만 완료
+        return (state.get("active", False) and 
+                len(state["wrong_queue"]) == 0 and 
+                len(state["completed"]) > 0)
     
     @classmethod
     def reset(cls):
@@ -1021,6 +1099,10 @@ class RepeatLearningManager:
                 "total_retries": 0,
                 "active": False,
             }
+        
+        # balloons 플래그도 초기화
+        if "repeat_learning_balloons_shown" in st.session_state:
+            del st.session_state["repeat_learning_balloons_shown"]
 
 
 # =====================================================
@@ -1376,38 +1458,62 @@ class LearningHistoryManager:
 # 3-7. 유사 문제 생성
 # =====================================================
 
-SIMILAR_QUESTION_PROMPT = """당신은 인도네시아어 교육 전문가입니다.
+SIMILAR_QUESTION_PROMPT = """You are an Indonesian language education expert.
 
-다음 원본 문제와 **유사하지만 다른** 문제를 1개 생성해주세요.
+Create ONE similar but different question based on the original question below.
 
-**원본 문제:**
-- 문제: {question}
-- 카테고리: {category}
-- 정답: {correct_answer}
-- 원문 근거: {evidence_quote}
+**Original Question:**
+- Question: {question}
+- Category: {category}
+- Correct Answer: {correct_answer}
+- Evidence Quote: {evidence_quote}
 
-**요구사항:**
-1. 같은 카테고리({category})와 난이도 유지
-2. 같은 문법/어휘 개념을 테스트하되, 다른 문장/상황 사용
-3. 원문 근거의 다른 부분이나 비슷한 패턴 활용
-4. 문제와 선택지는 한국어로 작성
-5. evidence_quote는 인도네시아어 원문
+**CRITICAL REQUIREMENTS:**
+1. Keep the same category ({category}) and difficulty level
+2. Test the same grammar/vocabulary concept but use different sentences/situations
+3. **Question and choices MUST be in Korean (한국어)**
+4. **evidence_quote MUST be in Indonesian language ONLY** - NEVER use Korean in evidence_quote
+5. The Indonesian sentence must be natural and grammatically correct
+6. Create a completely new Indonesian sentence for evidence_quote that tests the same concept
 
-**반드시 아래 JSON 형식으로만 응답 (다른 텍스트 없이):**
+**RESPOND ONLY in this JSON format (no other text):**
 {{
     "id": 99,
-    "question": "새로운 문제 (한국어)",
+    "question": "새로운 문제 (Korean only)",
     "category": "{category}",
     "choices": {{
-        "A": "선택지 A",
-        "B": "선택지 B",
-        "C": "선택지 C",
-        "D": "선택지 D"
+        "A": "선택지 A (Korean only)",
+        "B": "선택지 B (Korean only)",
+        "C": "선택지 C (Korean only)",
+        "D": "선택지 D (Korean only)"
     }},
-    "answer": "정답(A/B/C/D 중 하나만)",
-    "evidence_quote": "근거 문장 (인도네시아어)",
-    "explanation": "정답 해설 (한국어)"
+    "answer": "A or B or C or D",
+    "evidence_quote": "NEW Indonesian sentence here (Indonesian ONLY - NO Korean characters)",
+    "explanation": "정답 해설 (Korean only)"
 }}
+
+**CORRECT Example:**
+{{
+    "id": 99,
+    "question": "다음 인도네시아어 문장에서 'pasar'의 의미는?",
+    "category": "vocabulary",
+    "choices": {{
+        "A": "학교",
+        "B": "집",
+        "C": "시장",
+        "D": "병원"
+    }},
+    "answer": "C",
+    "evidence_quote": "Saya pergi ke pasar untuk membeli sayuran segar setiap pagi.",
+    "explanation": "pasar는 시장을 의미하며, 일상생활에서 자주 사용되는 단어입니다."
+}}
+
+**WRONG Example (DO NOT DO THIS):**
+{{
+    "evidence_quote": "저는 시장에 갑니다"  <- WRONG! This is Korean, not Indonesian!
+}}
+
+Remember: evidence_quote must ONLY contain Indonesian language characters and words!
 """
 
 def generate_similar_question(original_question: dict, model: str = "gpt-4o-mini") -> Optional[dict]:
@@ -1416,7 +1522,8 @@ def generate_similar_question(original_question: dict, model: str = "gpt-4o-mini
     category, _ = WeaknessAnalyzer.categorize_question(original_question)
     cat_info = CEFR_CATEGORIES.get(category, {})
     
-    prompt = SIMILAR_QUESTION_PROMPT.format(
+    prompt = safe_prompt_fill(
+        SIMILAR_QUESTION_PROMPT,
         question=original_question.get("question", ""),
         category=f"{cat_info.get('name', category)} ({category})",
         correct_answer=original_question.get("answer", ""),
@@ -1438,9 +1545,68 @@ def generate_similar_question(original_question: dict, model: str = "gpt-4o-mini
 # 3-8. TTS 섀도잉 기능
 # =====================================================
 
-def render_tts_player(text: str, translation: str = "", speed: str = "normal", key_suffix: str = ""):
+async def generate_tts_audio(text: str, output_file: str, voice: str = "id-ID-ArdiNeural", rate: str = "+0%"):
     """
-    TTS 재생 플레이어 렌더링 (브라우저 내장 Web Speech API 사용)
+    edge-tts를 사용하여 오디오 파일 생성
+    
+    Args:
+        text: 읽을 텍스트 (인도네시아어)
+        output_file: 출력 파일 경로
+        voice: 음성 모델 (기본: id-ID-ArdiNeural)
+               - id-ID-ArdiNeural (남성, 자연스러운 음성)
+               - id-ID-GadisNeural (여성, 자연스러운 음성)
+        rate: 재생 속도 (+0%: 보통, -50%: 느리게, +50%: 빠르게)
+    """
+    communicate = edge_tts.Communicate(text, voice, rate=rate)
+    await communicate.save(output_file)
+
+def get_tts_audio_path(text: str, speed: str = "normal") -> str:
+    """
+    TTS 오디오 파일 경로 반환 (캐시 사용)
+    
+    Args:
+        text: 읽을 텍스트
+        speed: 재생 속도
+    
+    Returns:
+        오디오 파일 경로
+    """
+    # 텍스트와 속도를 조합하여 해시 생성 (캐시 키)
+    cache_key = hashlib.md5(f"{text}_{speed}".encode()).hexdigest()
+    audio_file = os.path.join(TTS_CACHE_DIR, f"{cache_key}.mp3")
+    
+    # 캐시된 파일이 있으면 반환
+    if os.path.exists(audio_file):
+        return audio_file
+    
+    # 속도에 따른 rate 설정
+    speed_rates = {
+        "very_slow": "-50%",
+        "slow": "-25%",
+        "normal": "+0%",
+        "fast": "+25%",
+    }
+    rate = speed_rates.get(speed, "+0%")
+    
+    # 비동기 함수를 동기적으로 실행
+    try:
+        # 이벤트 루프 생성 또는 가져오기
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # 오디오 파일 생성
+        loop.run_until_complete(generate_tts_audio(text, audio_file, rate=rate))
+        return audio_file
+    except Exception as e:
+        st.error(f"TTS 오디오 생성 실패: {e}")
+        return None
+
+def render_tts_player_edgetts(text: str, translation: str = "", speed: str = "normal", key_suffix: str = ""):
+    """
+    edge-tts를 사용한 TTS 재생 플레이어 렌더링
     
     Args:
         text: 읽을 텍스트 (인도네시아어)
@@ -1448,6 +1614,48 @@ def render_tts_player(text: str, translation: str = "", speed: str = "normal", k
         speed: 재생 속도 키
         key_suffix: 고유 키 접미사
     """
+    # 텍스트 표시
+    st.markdown(f"""
+    <div style="background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); 
+                padding: 1rem; border-radius: 12px; margin: 0.5rem 0;
+                border-left: 4px solid #667eea;">
+        <p style="font-size: 1.1rem; color: #1e3c72; margin-bottom: 0.5rem; font-weight: 500;">
+            🇮🇩 {text}
+        </p>
+        {f'<p style="color: #666; font-size: 0.9rem; margin: 0;">🇰🇷 {translation}</p>' if translation else ''}
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # 오디오 파일 생성 또는 캐시에서 가져오기
+    with st.spinner("🎤 음성 생성 중..."):
+        audio_file = get_tts_audio_path(text, speed)
+    
+    if audio_file and os.path.exists(audio_file):
+        # Streamlit audio 컴포넌트로 재생
+        st.audio(audio_file, format="audio/mp3")
+    else:
+        st.error("⚠️ 음성 생성에 실패했습니다.")
+
+def render_tts_player(text: str, translation: str = "", speed: str = "normal", key_suffix: str = ""):
+    """
+    TTS 재생 플레이어 렌더링 (edge-tts 우선, 실패 시 Web Speech API 사용)
+    
+    한국어 음성을 fallback으로 사용하지 않고, 인도네시아어 음성만 사용합니다.
+    
+    Args:
+        text: 읽을 텍스트 (인도네시아어)
+        translation: 한국어 번역
+        speed: 재생 속도 키
+        key_suffix: 고유 키 접미사
+    """
+    # edge-tts를 우선 사용
+    try:
+        render_tts_player_edgetts(text, translation, speed, key_suffix)
+        return
+    except Exception as e:
+        st.warning(f"⚠️ edge-tts 사용 실패, Web Speech API로 전환합니다. ({e})")
+    
+    # fallback: Web Speech API (한국어 음성 제외)
     rate = TTS_SPEED_OPTIONS.get(speed, {}).get("rate", 1.0)
     
     # 텍스트 표시
@@ -1465,7 +1673,7 @@ def render_tts_player(text: str, translation: str = "", speed: str = "normal", k
     # JavaScript TTS 버튼
     button_id = abs(hash(text + key_suffix)) % 1000000
     
-    # HTML/JS로 TTS 구현
+    # HTML/JS로 TTS 구현 (인도네시아어 음성 강제 선택)
     components.html(f"""
     <div style="margin: 0.5rem 0;">
         <button onclick="speakText_{button_id}()" 
@@ -1486,20 +1694,376 @@ def render_tts_player(text: str, translation: str = "", speed: str = "normal", k
         </button>
     </div>
     <script>
-        function speakText_{button_id}() {{
+        // 음성 목록을 전역 변수로 저장
+        let cachedVoices_{button_id} = [];
+        
+        // 음성 로드 함수
+        function loadVoices_{button_id}() {{
+            return new Promise((resolve) => {{
+                let voices = window.speechSynthesis.getVoices();
+                if (voices.length > 0) {{
+                    cachedVoices_{button_id} = voices;
+                    console.log('🎤 음성 로드 완료:', voices.length, '개');
+                    resolve(voices);
+                }} else {{
+                    window.speechSynthesis.onvoiceschanged = () => {{
+                        voices = window.speechSynthesis.getVoices();
+                        cachedVoices_{button_id} = voices;
+                        console.log('🎤 음성 로드 완료 (delayed):', voices.length, '개');
+                        resolve(voices);
+                    }};
+                    // 타임아웃 설정 (2초 후에도 로드 안되면 빈 배열)
+                    setTimeout(() => {{
+                        if (cachedVoices_{button_id}.length === 0) {{
+                            console.warn('⚠️ 음성 로드 타임아웃');
+                            resolve([]);
+                        }}
+                    }}, 2000);
+                }}
+            }});
+        }}
+        
+        // 페이지 로드 시 음성 미리 로드
+        loadVoices_{button_id}();
+        
+        async function speakText_{button_id}() {{
             window.speechSynthesis.cancel();
+            
+            // 음성 목록 로드 대기
+            if (cachedVoices_{button_id}.length === 0) {{
+                await loadVoices_{button_id}();
+            }}
+            
             const text = `{text.replace('`', "'")}`;
             const utterance = new SpeechSynthesisUtterance(text);
-            utterance.lang = 'id-ID';
-            utterance.rate = {rate};
-            utterance.pitch = 1;
-            window.speechSynthesis.speak(utterance);
+            const voices = cachedVoices_{button_id};
+            
+            // 인도네시아어 음성 우선순위 검색
+            let indonesianVoice = null;
+            
+            console.log('🔍 총', voices.length, '개 음성 검색 중...');
+            
+            // 1순위: id-ID 정확히 일치
+            indonesianVoice = voices.find(voice => voice.lang === 'id-ID');
+            if (indonesianVoice) console.log('✅ 1순위 매치:', indonesianVoice.name);
+            
+            // 2순위: id로 시작 (id-ID, id 등)
+            if (!indonesianVoice) {{
+                indonesianVoice = voices.find(voice => voice.lang.toLowerCase().startsWith('id'));
+                if (indonesianVoice) console.log('✅ 2순위 매치:', indonesianVoice.name);
+            }}
+            
+            // 3순위: 이름에 Indonesia 포함
+            if (!indonesianVoice) {{
+                indonesianVoice = voices.find(voice => 
+                    voice.name.toLowerCase().includes('indonesia') ||
+                    voice.name.toLowerCase().includes('indonesian')
+                );
+                if (indonesianVoice) console.log('✅ 3순위 매치:', indonesianVoice.name);
+            }}
+            
+            // 4순위: 말레이시아어 (유사 언어)
+            if (!indonesianVoice) {{
+                indonesianVoice = voices.find(voice => 
+                    voice.lang.toLowerCase().startsWith('ms') ||
+                    voice.name.toLowerCase().includes('malay')
+                );
+                if (indonesianVoice) console.log('✅ 4순위 매치 (말레이):', indonesianVoice.name);
+            }}
+            
+            // 음성 설정
+            if (indonesianVoice) {{
+                utterance.voice = indonesianVoice;
+                utterance.lang = indonesianVoice.lang;
+                console.log('🎯 최종 선택:', indonesianVoice.name, '(', indonesianVoice.lang, ')');
+                
+                utterance.rate = {rate};
+                utterance.pitch = 1;
+                utterance.volume = 1;
+                
+                // 재생 시작/종료 이벤트 로깅
+                utterance.onstart = () => console.log('▶️ TTS 재생 시작');
+                utterance.onend = () => console.log('⏹️ TTS 재생 완료');
+                utterance.onerror = (e) => console.error('❌ TTS 오류:', e);
+                
+                window.speechSynthesis.speak(utterance);
+            }} else {{
+                // 인도네시아어 음성이 없으면 재생하지 않음 (한국어 fallback 방지)
+                console.error('❌ 인도네시아어 음성을 찾을 수 없습니다!');
+                console.log('📋 사용 가능한 음성:');
+                voices.forEach(v => console.log('  -', v.name, '(', v.lang, ')'));
+                alert('⚠️ 브라우저에 인도네시아어 음성이 설치되어 있지 않습니다.\\n\\nedge-tts가 설치되지 않았거나 실패했습니다.\\n\\n해결 방법:\\n1. 터미널에서 "pip install edge-tts" 실행\\n2. 또는 브라우저 설정에서 인도네시아어 음성 추가:\\n   - Windows: 설정 > 시간 및 언어 > 음성\\n   - Mac: 시스템 환경설정 > 손쉬운 사용 > 음성');
+                return;  // 재생하지 않음
+            }}
         }}
+        
         function stopSpeech() {{
             window.speechSynthesis.cancel();
         }}
+        
+        // 음성 목록 로드 대기 (일부 브라우저에서 필수)
+        if (window.speechSynthesis.getVoices().length === 0) {{
+            window.speechSynthesis.addEventListener('voiceschanged', function() {{
+                const voices = window.speechSynthesis.getVoices();
+                console.log('🔊 음성 목록 로드됨:', voices.length, '개');
+                const idVoices = voices.filter(v => v.lang.startsWith('id'));
+                if (idVoices.length > 0) {{
+                    console.log('✅ 인도네시아어 음성:', idVoices.map(v => v.name).join(', '));
+                }} else {{
+                    console.warn('⚠️ 인도네시아어 음성이 없습니다. 시스템 설정에서 추가하세요.');
+                }}
+            }});
+        }}
     </script>
     """, height=70)
+
+
+def render_ai_learning_coach(wrong_items: list, score_info: dict, condition: str, key_prefix: str = ""):
+    """
+    AI 학습 코치 UI 렌더링
+    
+    Args:
+        wrong_items: 틀린 문제 목록
+        score_info: 점수 정보 (correct, total, percent)
+        condition: 학습자 컨디션
+        key_prefix: 키 접두사
+    """
+    st.markdown("#### 🤖 AI 학습 코치")
+    
+    if st.button("💡 맞춤형 학습 조언 받기", type="secondary", use_container_width=True, key=f"{key_prefix}_ai_coach_btn"):
+        with st.spinner("AI 코치가 분석 중..."):
+            # 취약 카테고리 분석
+            categories = {}
+            for item in wrong_items:
+                cat = item.get("category", "기타")
+                categories[cat] = categories.get(cat, 0) + 1
+            
+            weak_cats = ", ".join([f"{CEFR_CATEGORIES.get(k, {}).get('name', k)}({v}개)" for k, v in categories.items()])
+            
+            # 틀린 문제 상세
+            wrong_details_list = []
+            for i, item in enumerate(wrong_items, 1):
+                wrong_details_list.append(
+                    f"{i}. {item.get('question', '')} "
+                    f"(내 답: {item.get('user_answer')}, 정답: {item.get('correct_answer')})"
+                )
+            wrong_details = "\n".join(wrong_details_list)
+            
+            # AI 코치 프롬프트
+            prompt = AI_LEARNING_COACH_PROMPT.format(
+                score_percent=score_info.get("percent", 0),
+                correct=score_info.get("correct", 0),
+                total=score_info.get("total", 5),
+                condition=condition if condition else "미설정",
+                wrong_count=len(wrong_items),
+                weak_categories=weak_cats if weak_cats else "없음",
+                wrong_details=wrong_details
+            )
+            
+            try:
+                ai_coach = llm_json(prompt, model=st.session_state.get("gen_model", "gpt-4o-mini"))
+                st.session_state[f"{key_prefix}_ai_coach"] = ai_coach
+                st.success("✅ AI 코치 분석 완료!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"AI 코치 생성 실패: {e}")
+    
+    # AI 코치 결과 표시
+    if f"{key_prefix}_ai_coach" in st.session_state:
+        ai_coach = st.session_state[f"{key_prefix}_ai_coach"]
+        
+        # 전반적인 평가
+        st.markdown("##### 📊 전반적인 평가")
+        st.info(ai_coach.get("overall_assessment", ""))
+        
+        # 강점과 약점
+        col_strength, col_weakness = st.columns(2)
+        with col_strength:
+            st.markdown("**💪 강점**")
+            for strength in ai_coach.get("strengths", []):
+                st.markdown(f"- {strength}")
+        with col_weakness:
+            st.markdown("**🎯 개선 필요**")
+            for weakness in ai_coach.get("weaknesses", []):
+                st.markdown(f"- {weakness}")
+        
+        # 즉시 실행 액션
+        st.markdown("##### ⚡ 지금 바로 할 일")
+        for action in ai_coach.get("immediate_actions", []):
+            with st.expander(f"🎯 {action.get('action', '')} ({action.get('time_needed', '')})"):
+                st.markdown(f"**이유:** {action.get('reason', '')}")
+        
+        # 주간 학습 계획
+        st.markdown("##### 📅 1주일 학습 계획")
+        for plan in ai_coach.get("weekly_plan", []):
+            st.markdown(f"**{plan.get('day', '')}**: {plan.get('focus', '')}")
+            for activity in plan.get("activities", []):
+                st.markdown(f"  - {activity}")
+        
+        # 격려 메시지
+        st.markdown("##### 💬 코치의 한마디")
+        st.success(ai_coach.get("motivational_message", ""))
+        
+        # 추천 리소스
+        if ai_coach.get("recommended_resources"):
+            st.markdown("##### 📚 추천 학습 자료")
+            for resource in ai_coach.get("recommended_resources", []):
+                st.markdown(f"- **[{resource.get('type', '')}] {resource.get('name', '')}**: {resource.get('description', '')}")
+
+
+def render_repeat_learning_ui(key_prefix: str = ""):
+    """
+    반복 학습 UI 렌더링 (인라인으로 사용 가능)
+    
+    Args:
+        key_prefix: 키 접두사 (중복 방지)
+    """
+    progress = RepeatLearningManager.get_progress()
+    
+    if not progress["active"]:
+        return False  # 반복 학습이 활성화되지 않음
+    
+    # 진행 상황 표시
+    st.markdown("### 📊 반복 학습 진행 중")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("완료", f"{progress['completed']}/{progress['total']}")
+    with col2:
+        st.metric("남은 문제", progress['remaining'])
+    with col3:
+        st.metric("총 시도", progress['total_retries'])
+    
+    st.progress(progress['progress_percent'] / 100, text=f"진행률: {progress['progress_percent']}%")
+    
+    # 완료 체크
+    if RepeatLearningManager.is_complete():
+        # balloons는 한 번만 표시 (플래그 사용)
+        if not st.session_state.get("repeat_learning_balloons_shown", False):
+            st.balloons()
+            st.session_state["repeat_learning_balloons_shown"] = True
+        
+        st.success("🎉 모든 문제를 정복했습니다! 훌륭해요!")
+        
+        # 완료 통계
+        state = st.session_state.get(RepeatLearningManager.SESSION_KEY, {})
+        completed = state.get("completed", [])
+        
+        st.markdown("#### 📊 반복 학습 결과")
+        for item in completed:
+            retries = item.get("retries_needed", 1)
+            emoji = "🌟" if retries == 1 else "✅" if retries <= 3 else "💪"
+            st.markdown(f"{emoji} Q{item.get('id')}: {retries}번 만에 성공")
+        
+        col_restart, col_results, col_end = st.columns(3)
+        with col_restart:
+            if st.button("🔄 처음부터 다시", key=f"{key_prefix}_repeat_restart", use_container_width=True):
+                RepeatLearningManager.reset()
+                st.rerun()
+        with col_results:
+            if st.button("📊 학습 결과 보기", type="primary", key=f"{key_prefix}_repeat_goto_results", use_container_width=True):
+                navigate_to_page("results")
+        with col_end:
+            if st.button("🏠 학습 종료", key=f"{key_prefix}_repeat_end", use_container_width=True):
+                RepeatLearningManager.reset()
+                st.rerun()
+        return True
+    
+    # 현재 문제 풀기
+    current_q = RepeatLearningManager.get_next_question()
+    
+    if not current_q:
+        return False
+    
+    st.divider()
+    
+    # 문제 정보
+    q_id = current_q.get("id", "?")
+    is_similar = current_q.get("is_similar", False)
+    
+    if is_similar:
+        st.markdown(f"### 🔄 유사 문제 (원본: Q{current_q.get('original_id', '?')})")
+    else:
+        st.markdown(f"### ❓ 문제 Q{q_id}")
+    
+    # 카테고리 표시
+    category = current_q.get("category", "")
+    if category:
+        cat_info = CEFR_CATEGORIES.get(category, {"icon": "📌", "name": category})
+        st.caption(f"{cat_info['icon']} {cat_info['name']}")
+    
+    # 문제
+    question_text = current_q.get('question', '')
+    if not question_text:
+        st.error("⚠️ 문제를 불러올 수 없습니다. 반복 학습을 다시 시작해주세요.")
+        if st.button("🔄 반복 학습 재시작", key=f"{key_prefix}_restart_error"):
+            RepeatLearningManager.reset()
+            st.rerun()
+        return False
+    
+    st.markdown(f"**{question_text}**")
+    
+    # 선택지
+    choices = current_q.get("choices", {})
+    
+    with st.form(f"{key_prefix}_repeat_answer_form_{q_id}"):
+        answer = st.radio(
+            "답을 선택하세요",
+            options=["A", "B", "C", "D"],
+            format_func=lambda x: f"{x}. {choices.get(x, '')}",
+            horizontal=True,
+            index=None,
+            key=f"{key_prefix}_repeat_answer_{q_id}"
+        )
+        
+        col_submit, col_similar, col_stop = st.columns([2, 1, 1])
+        with col_submit:
+            submitted = st.form_submit_button("✅ 제출", type="primary", use_container_width=True)
+        with col_similar:
+            gen_similar = st.form_submit_button("🔄 유사 문제", use_container_width=True)
+        with col_stop:
+            stop_learning = st.form_submit_button("🛑 중단", use_container_width=True)
+    
+    # 중단 처리
+    if stop_learning:
+        RepeatLearningManager.reset()
+        st.info("반복 학습을 중단했습니다.")
+        st.rerun()
+    
+    # 답안 제출 처리
+    if submitted:
+        if not answer:
+            st.error("답을 선택해주세요!")
+        else:
+            is_correct, result = RepeatLearningManager.check_answer(answer)
+            
+            if is_correct:
+                st.success(f"🎉 정답입니다! ({result['retry_count']}번 만에 성공)")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(f"❌ 오답입니다. 정답: {result['correct_answer']}")
+                
+                # 해설 표시
+                why_correct = current_q.get("why_correct_ko", "")
+                if why_correct:
+                    st.info(f"💡 **해설:** {why_correct}")
+                
+                evidence = current_q.get("evidence_quote", "")
+                if evidence:
+                    st.markdown(f"📄 **근거:** _{evidence}_")
+    
+    # 유사 문제 생성
+    if gen_similar:
+        with st.spinner("유사 문제 생성 중..."):
+            model_name = st.session_state.get("gen_model", "gpt-4o-mini")
+            similar = generate_similar_question(current_q, model=model_name)
+            if similar:
+                RepeatLearningManager.replace_with_similar(similar)
+                st.success("✅ 유사 문제가 생성되었습니다!")
+                st.rerun()
+    
+    return True
 
 
 def render_shadowing_section(coach_result: dict, speed: str = "normal"):
@@ -1535,12 +2099,22 @@ def render_shadowing_section(coach_result: dict, speed: str = "normal"):
         for i, quote in enumerate(evidence_quotes):
             with st.expander(f"🔴 오답 근거 {i+1}", expanded=(i == 0)):
                 why_correct = wrong_items[i].get("why_correct_ko", "") if i < len(wrong_items) else ""
+
+                # ===== 30초 진단(디버그) =====
+                st.write("DEBUG quote:", (quote or "")[:200])
+                st.write(
+                    "DEBUG contains_korean:",
+                    any('가' <= ch <= '힣' for ch in (quote or ""))
+                )
+                # ============================
+
                 render_tts_player(
                     text=quote,
                     translation=why_correct[:100] + "..." if len(why_correct) > 100 else why_correct,
                     speed=speed,
                     key_suffix=f"evidence_{i}"
                 )
+
     
     # 일반 섀도잉 문장
     shadowing_sentences = coach_result.get("shadowing_sentences", [])
@@ -1557,44 +2131,6 @@ def render_shadowing_section(coach_result: dict, speed: str = "normal"):
                     speed=speed,
                     key_suffix=f"shadow_{i}"
                 )
-    """
-    OpenAI Structured Outputs를 사용하여 스키마에 맞는 응답을 받습니다.
-    
-    Args:
-        prompt: 프롬프트 텍스트
-        response_model: Pydantic BaseModel 클래스
-        model: 사용할 모델
-    
-    Returns:
-        dict: Pydantic 모델을 딕셔너리로 변환한 결과
-    """
-    try:
-        completion = client.beta.chat.completions.parse(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are an Indonesian language learning coach. Return structured output that matches the schema."},
-                {"role": "user", "content": prompt},
-            ],
-            response_format=response_model,
-            temperature=0.3,
-        )
-        
-        parsed_response = completion.choices[0].message.parsed
-        
-        # 디버그용: 원문 응답 저장
-        if "last_llm_response" not in st.session_state:
-            st.session_state["last_llm_response"] = {}
-        st.session_state["last_llm_response"]["parsed"] = parsed_response.model_dump()
-        st.session_state["last_llm_response"]["model"] = response_model.__name__
-        
-        return parsed_response.model_dump()
-        
-    except Exception as e:
-        # 디버그용: 에러 저장
-        if "last_llm_response" not in st.session_state:
-            st.session_state["last_llm_response"] = {}
-        st.session_state["last_llm_response"]["error"] = str(e)
-        raise
 
 
 # =====================================================
@@ -1652,6 +2188,15 @@ def sanitize_coach_structured(coach: dict, quiz: dict, user_answers: dict):
     Returns:
         dict: 검증 및 점수가 추가된 코칭 결과
     """
+    # None 체크
+    if coach is None:
+        coach = {
+            "items": [],
+            "weak_points_ko": [],
+            "tomorrow_plan_10min_ko": [],
+            "shadowing_sentences": [],
+        }
+    
     # 점수 계산
     correct_n, total, percent, _ = compute_grade(quiz, user_answers)
     
@@ -2030,6 +2575,8 @@ with st.sidebar:
     # 모델 설정
     st.subheader("🤖 모델 설정")
     gen_model = st.text_input("생성 모델", value="gpt-4o-mini")
+    # 세션 상태에 저장하여 다른 곳에서도 사용 가능하도록
+    st.session_state["gen_model"] = gen_model
     
     # 디버그 모드 표시 (활성화된 경우)
     if st.session_state.get("debug_mode_enabled", False):
@@ -2042,22 +2589,113 @@ with st.sidebar:
 debug = st.session_state.get("debug_mode_enabled", False)
 
 # =====================================================
-# 탭 구성
+# 페이지 네비게이션 시스템
 # =====================================================
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🎵 오디오 학습",
-    "📺 YouTube 학습",
-    "📄 텍스트 학습",
-    "📊 학습 결과",
-    "⚙️ 설정"
-])
+# 현재 페이지 초기화
+if "current_page" not in st.session_state:
+    st.session_state["current_page"] = "home"
+
+# 메인 홈으로 돌아가는 함수
+def navigate_to_home():
+    """메인 홈 화면으로 이동"""
+    st.session_state["current_page"] = "home"
+    st.rerun()
+
+# 특정 페이지로 이동하는 함수
+def navigate_to_page(page_name: str):
+    """특정 페이지로 이동"""
+    st.session_state["current_page"] = page_name
+    st.rerun()
 
 # =====================================================
-# TAB 1: 오디오 학습
+# 메인 홈 화면
 # =====================================================
 
-with tab1:
+def render_home_page():
+    """메인 홈 화면 렌더링 (큰 카드 형태)"""
+    st.title("🇮🇩 인도네시아어 리스닝 코치")
+    st.markdown("### 환영합니다! 학습 방법을 선택하세요")
+    
+    st.divider()
+    
+    # 3개의 학습 카드를 큰 형태로 표시 (클릭 가능한 버튼)
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        # 카드 버튼 (전체가 클릭 가능)
+        if st.button("🎵\n\n**오디오 학습**\n\nWAV 파일로 듣기 연습", 
+                     key="btn_audio", 
+                     use_container_width=True, 
+                     type="primary",
+                     help="오디오 파일을 업로드하여 학습하기"):
+            navigate_to_page("audio")
+    
+    with col2:
+        # 카드 버튼 (전체가 클릭 가능)
+        if st.button("📺\n\n**YouTube 학습**\n\n유튜브 영상으로 듣기 연습", 
+                     key="btn_youtube", 
+                     use_container_width=True, 
+                     type="primary",
+                     help="YouTube 영상으로 학습하기"):
+            navigate_to_page("youtube")
+    
+    with col3:
+        # 카드 버튼 (전체가 클릭 가능)
+        if st.button("📄\n\n**텍스트 학습**\n\n인도네시아어 텍스트로 연습", 
+                     key="btn_text", 
+                     use_container_width=True, 
+                     type="primary",
+                     help="웹 텍스트로 학습하기"):
+            navigate_to_page("text")
+    
+    st.divider()
+    
+    # 학습 결과 및 설정 카드 (클릭 가능한 버튼)
+    col4, col5 = st.columns(2)
+    
+    with col4:
+        # 카드 버튼 (전체가 클릭 가능)
+        if st.button("📊\n\n**학습 결과**", 
+                     key="btn_results", 
+                     use_container_width=True,
+                     help="학습 통계 및 분석 보기"):
+            navigate_to_page("results")
+    
+    with col5:
+        # 카드 버튼 (전체가 클릭 가능)
+        if st.button("⚙️\n\n**설정**", 
+                     key="btn_settings", 
+                     use_container_width=True,
+                     help="앱 설정 및 로그 관리"):
+            navigate_to_page("settings")
+    
+    st.divider()
+    
+    # 최근 학습 통계 요약
+    st.markdown("### 📈 최근 학습 통계")
+    history_stats = LearningHistoryManager.get_stats()
+    
+    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+    with col_s1:
+        st.metric("총 세션", f"{history_stats['total_sessions']}회")
+    with col_s2:
+        st.metric("평균 점수", f"{history_stats['avg_score']}%")
+    with col_s3:
+        st.metric("연속 학습일", f"{history_stats['streak_days']}일")
+    with col_s4:
+        st.metric("이번 주 세션", f"{history_stats['sessions_this_week']}회")
+
+# =====================================================
+# 페이지 함수들
+# =====================================================
+
+def render_audio_page():
+    """오디오 학습 페이지 렌더링"""
+    # 홈 버튼
+    if st.button("🏠 메인 홈으로", key="home_from_audio"):
+        navigate_to_home()
+    
     st.header("🎵 오디오로 학습하기")
     st.markdown("WAV 파일을 업로드하면 음성을 텍스트로 변환하고 퀴즈를 생성합니다.")
     
@@ -2150,11 +2788,13 @@ with tab1:
         if audio_transcript:
             try:
                 quiz_text = audio_transcript[:4000] if len(audio_transcript) > 4000 else audio_transcript
-                prompt = QUIZ_PROMPT.format(
+                prompt = safe_prompt_fill(
+                    QUIZ_PROMPT,
+                    num_questions=str(num_questions),
                     transcript=quiz_text,
-                    num_questions=num_questions,
                     level=level
                 )
+
                 
                 if debug:
                     with st.expander("🔍 DEBUG: QUIZ_PROMPT"):
@@ -2221,10 +2861,11 @@ with tab1:
                         try:
                             condition_simple = condition.split()[0] if condition else "B"
                             
-                            prompt = COACH_PROMPT.format(
-                                transcript=audio_transcript[:4000],
+                            prompt = safe_prompt_fill(
+                                COACH_PROMPT,
+                                transcript=(audio_transcript[:4000] if audio_transcript and len(audio_transcript) > 4000 else (audio_transcript or "")),
                                 quiz_json=json.dumps(audio_quiz, ensure_ascii=False),
-                                user_answers=json.dumps(user_answers, ensure_ascii=False),
+                                user_answers_json=json.dumps(user_answers, ensure_ascii=False),
                                 condition=condition_simple,
                             )
                             
@@ -2241,6 +2882,10 @@ with tab1:
                                 q = next((q for q in audio_quiz.get("questions", []) if str(q.get("id")) == str(item.get("id"))), {})
                                 analyzed = WeaknessAnalyzer.analyze_wrong_answer(q, item.get("user_answer", ""), item.get("correct_answer", ""))
                                 analyzed.update(item)
+                                # ID 필드 명시적으로 설정 (SRS에 추가되도록)
+                                q_id = str(q.get("id", item.get("id", "")))
+                                analyzed["id"] = q_id
+                                analyzed["question_id"] = q_id
                                 wrong_items_analyzed.append(analyzed)
                             
                             LearningHistoryManager.add_session({
@@ -2367,12 +3012,67 @@ with tab1:
                 st.markdown(f"**{s.get('id', '')}**")
                 st.markdown(f"→ _{s.get('ko', '')}_")
                 st.markdown("")
+            
+            # AI 학습 코치 및 반복 학습 (오답이 있을 때만 표시)
+            if wrong_items and len(wrong_items) > 0:
+                st.divider()
+                render_ai_learning_coach(
+                    wrong_items=wrong_items,
+                    score_info={"correct": correct, "total": total, "percent": percent},
+                    condition=condition,
+                    key_prefix="audio"
+                )
+                
+                st.divider()
+                
+                # 반복 학습이 이미 진행 중인지 확인
+                repeat_progress = RepeatLearningManager.get_progress()
+                
+                if not repeat_progress["active"]:
+                    # 반복 학습 시작 버튼
+                    st.markdown("#### 🔄 반복 학습")
+                    st.info(f"💡 틀린 문제 {len(wrong_items)}개를 모두 맞출 때까지 반복 학습할 수 있습니다!")
+                    
+                    if st.button("🚀 틀린 문제 반복 학습 시작", type="primary", use_container_width=True, key="audio_start_repeat"):
+                        # 취약점 분석 추가
+                        analyzed_wrong = []
+                        for item in wrong_items:
+                            q_id = str(item.get("id"))
+                            orig_q = next((q for q in questions if str(q.get("id")) == q_id), {})
+                            analyzed = WeaknessAnalyzer.analyze_wrong_answer(
+                                orig_q, 
+                                item.get("user_answer", ""),
+                                item.get("correct_answer", "")
+                            )
+                            analyzed["why_correct_ko"] = item.get("why_correct_ko", "")
+                            analyzed["why_user_wrong_ko"] = item.get("why_user_wrong_ko", "")
+                            analyzed_wrong.append(analyzed)
+                        
+                        # 반복 학습 시작
+                        RepeatLearningManager.start_repeat_learning(analyzed_wrong, questions)
+                        st.rerun()
+                else:
+                    # 반복 학습 UI 표시
+                    render_repeat_learning_ui(key_prefix="audio")
+                
+                # 학습 결과 페이지로 이동 버튼
+                st.divider()
+                if st.button("📊 학습 결과 대시보드 보기", type="primary", use_container_width=True, key="audio_goto_results"):
+                    navigate_to_page("results")
+            else:
+                st.divider()
+                st.success("🎉 모든 문제를 맞혔습니다! 완벽해요!")
+                
+                # 학습 결과 페이지로 이동 버튼
+                if st.button("📊 학습 결과 대시보드 보기", type="primary", use_container_width=True, key="audio_goto_results_perfect"):
+                    navigate_to_page("results")
 
-# =====================================================
-# TAB 2: YouTube 학습
-# =====================================================
-
-with tab2:
+def render_youtube_page():
+    """YouTube 학습 페이지 렌더링"""
+    # 홈 버튼
+    if st.button("🏠 메인 홈으로", key="home_from_youtube"):
+        navigate_to_home()
+    
     st.header("📺 YouTube로 학습하기")
     st.markdown("YouTube 영상을 시청하고 인도네시아어 요약을 작성한 후 퀴즈를 풀어보세요!")
     
@@ -2390,7 +3090,7 @@ with tab2:
     
     # 샘플 로드 플래그 확인 (이전 rerun에서 설정된 경우)
     if st.session_state.get("load_sample_flag"):
-        st.session_state["youtube_url_input"] = "https://www.youtube.com/watch?v=WOt9_kqiZtw"
+        st.session_state["youtube_url_input"] = "https://www.youtube.com/watch?v=_j3ixl3EH6M&t=4s"
         st.session_state.pop("load_sample_flag")  # 플래그 제거
         reset_learning_state("youtube")
         st.session_state.pop("prev_youtube_video_id", None)
@@ -2646,9 +3346,10 @@ Topik utama adalah...""",
             
             try:
                 quiz_text = saved_transcript[:4000] if len(saved_transcript) > 4000 else saved_transcript
-                prompt = QUIZ_PROMPT.format(
+                prompt = safe_prompt_fill(
+                    QUIZ_PROMPT,
+                    num_questions=str(num_questions),
                     transcript=quiz_text,
-                    num_questions=num_questions,
                     level=level
                 )
                 
@@ -2731,10 +3432,11 @@ Topik utama adalah...""",
                             condition_simple = condition.split()[0] if condition else "B"
                             saved_transcript = st.session_state.get("youtube_transcript", "")
                             
-                            prompt = COACH_PROMPT.format(
-                                transcript=saved_transcript[:4000],
+                            prompt = safe_prompt_fill(
+                                COACH_PROMPT,
+                                transcript=(saved_transcript[:4000] if saved_transcript and len(saved_transcript) > 4000 else (saved_transcript or "")),
                                 quiz_json=json.dumps(youtube_quiz, ensure_ascii=False),
-                                user_answers=json.dumps(user_answers, ensure_ascii=False),
+                                user_answers_json=json.dumps(user_answers, ensure_ascii=False),
                                 condition=condition_simple,
                             )
                             
@@ -2751,6 +3453,10 @@ Topik utama adalah...""",
                                 q = next((q for q in youtube_quiz.get("questions", []) if str(q.get("id")) == str(item.get("id"))), {})
                                 analyzed = WeaknessAnalyzer.analyze_wrong_answer(q, item.get("user_answer", ""), item.get("correct_answer", ""))
                                 analyzed.update(item)
+                                # ID 필드 명시적으로 설정 (SRS에 추가되도록)
+                                q_id = str(q.get("id", item.get("id", "")))
+                                analyzed["id"] = q_id
+                                analyzed["question_id"] = q_id
                                 wrong_items_analyzed.append(analyzed)
                             
                             LearningHistoryManager.add_session({
@@ -2882,6 +3588,60 @@ Topik utama adalah...""",
                 st.markdown(f"**{s.get('id', '')}**")
                 st.markdown(f"→ _{s.get('ko', '')}_")
                 st.markdown("")
+            
+            # AI 학습 코치 및 반복 학습 (오답이 있을 때만 표시)
+            if wrong_items and len(wrong_items) > 0:
+                st.divider()
+                render_ai_learning_coach(
+                    wrong_items=wrong_items,
+                    score_info={"correct": correct, "total": total, "percent": percent},
+                    condition=condition,
+                    key_prefix="youtube"
+                )
+                
+                st.divider()
+                
+                # 반복 학습이 이미 진행 중인지 확인
+                repeat_progress = RepeatLearningManager.get_progress()
+                
+                if not repeat_progress["active"]:
+                    # 반복 학습 시작 버튼
+                    st.markdown("#### 🔄 반복 학습")
+                    st.info(f"💡 틀린 문제 {len(wrong_items)}개를 모두 맞출 때까지 반복 학습할 수 있습니다!")
+                    
+                    if st.button("🚀 틀린 문제 반복 학습 시작", type="primary", use_container_width=True, key="youtube_start_repeat"):
+                        # 취약점 분석 추가
+                        analyzed_wrong = []
+                        for item in wrong_items:
+                            q_id = str(item.get("id"))
+                            orig_q = next((q for q in questions if str(q.get("id")) == q_id), {})
+                            analyzed = WeaknessAnalyzer.analyze_wrong_answer(
+                                orig_q, 
+                                item.get("user_answer", ""),
+                                item.get("correct_answer", "")
+                            )
+                            analyzed["why_correct_ko"] = item.get("why_correct_ko", "")
+                            analyzed["why_user_wrong_ko"] = item.get("why_user_wrong_ko", "")
+                            analyzed_wrong.append(analyzed)
+                        
+                        # 반복 학습 시작
+                        RepeatLearningManager.start_repeat_learning(analyzed_wrong, questions)
+                        st.rerun()
+                else:
+                    # 반복 학습 UI 표시
+                    render_repeat_learning_ui(key_prefix="youtube")
+                
+                # 학습 결과 페이지로 이동 버튼
+                st.divider()
+                if st.button("📊 학습 결과 대시보드 보기", type="primary", use_container_width=True, key="youtube_goto_results"):
+                    navigate_to_page("results")
+            else:
+                st.divider()
+                st.success("🎉 모든 문제를 맞혔습니다! 완벽해요!")
+                
+                # 학습 결과 페이지로 이동 버튼
+                if st.button("📊 학습 결과 대시보드 보기", type="primary", use_container_width=True, key="youtube_goto_results_perfect"):
+                    navigate_to_page("results")
     else:
         st.info("""
         📝 **요약을 작성해주세요!**
@@ -2893,11 +3653,12 @@ Topik utama adalah...""",
         💡 **팁**: 최소 5문장 이상 작성하면 좋은 퀴즈가 생성됩니다!
         """)
 
-# =====================================================
-# TAB 3: 텍스트 학습
-# =====================================================
-
-with tab3:
+def render_text_page():
+    """텍스트 학습 페이지 렌더링"""
+    # 홈 버튼
+    if st.button("🏠 메인 홈으로", key="home_from_text"):
+        navigate_to_home()
+    
     st.header("📄 텍스트로 학습하기")
     st.markdown("웹 링크를 입력하면 텍스트를 추출하여 학습 자료로 사용합니다.")
     
@@ -2994,9 +3755,10 @@ with tab3:
         if saved_text:
             try:
                 quiz_text = saved_text[:4000] if len(saved_text) > 4000 else saved_text
-                prompt = QUIZ_PROMPT.format(
+                prompt = safe_prompt_fill(
+                    QUIZ_PROMPT,
+                    num_questions=str(num_questions),
                     transcript=quiz_text,
-                    num_questions=num_questions,
                     level=level
                 )
                 
@@ -3064,11 +3826,13 @@ with tab3:
                     else:
                         try:
                             condition_simple = condition.split()[0] if condition else "B"
+                            saved_text = st.session_state.get("extracted_text", "")
                             
-                            prompt = COACH_PROMPT.format(
-                                transcript=extracted_text[:4000],
+                            prompt = safe_prompt_fill(
+                                COACH_PROMPT,
+                                transcript=(saved_text[:4000] if saved_text and len(saved_text) > 4000 else (saved_text or "")),
                                 quiz_json=json.dumps(text_quiz, ensure_ascii=False),
-                                user_answers=json.dumps(user_answers, ensure_ascii=False),
+                                user_answers_json=json.dumps(user_answers, ensure_ascii=False),
                                 condition=condition_simple,
                             )
                             
@@ -3085,6 +3849,10 @@ with tab3:
                                 q = next((q for q in text_quiz.get("questions", []) if str(q.get("id")) == str(item.get("id"))), {})
                                 analyzed = WeaknessAnalyzer.analyze_wrong_answer(q, item.get("user_answer", ""), item.get("correct_answer", ""))
                                 analyzed.update(item)
+                                # ID 필드 명시적으로 설정 (SRS에 추가되도록)
+                                q_id = str(q.get("id", item.get("id", "")))
+                                analyzed["id"] = q_id
+                                analyzed["question_id"] = q_id
                                 wrong_items_analyzed.append(analyzed)
                             
                             LearningHistoryManager.add_session({
@@ -3212,12 +3980,67 @@ with tab3:
                 st.markdown(f"**{s.get('id', '')}**")
                 st.markdown(f"→ _{s.get('ko', '')}_")
                 st.markdown("")
+            
+            # AI 학습 코치 및 반복 학습 (오답이 있을 때만 표시)
+            if wrong_items and len(wrong_items) > 0:
+                st.divider()
+                render_ai_learning_coach(
+                    wrong_items=wrong_items,
+                    score_info={"correct": correct, "total": total, "percent": percent},
+                    condition=condition,
+                    key_prefix="text"
+                )
+                
+                st.divider()
+                
+                # 반복 학습이 이미 진행 중인지 확인
+                repeat_progress = RepeatLearningManager.get_progress()
+                
+                if not repeat_progress["active"]:
+                    # 반복 학습 시작 버튼
+                    st.markdown("#### 🔄 반복 학습")
+                    st.info(f"💡 틀린 문제 {len(wrong_items)}개를 모두 맞출 때까지 반복 학습할 수 있습니다!")
+                    
+                    if st.button("🚀 틀린 문제 반복 학습 시작", type="primary", use_container_width=True, key="text_start_repeat"):
+                        # 취약점 분석 추가
+                        analyzed_wrong = []
+                        for item in wrong_items:
+                            q_id = str(item.get("id"))
+                            orig_q = next((q for q in questions if str(q.get("id")) == q_id), {})
+                            analyzed = WeaknessAnalyzer.analyze_wrong_answer(
+                                orig_q, 
+                                item.get("user_answer", ""),
+                                item.get("correct_answer", "")
+                            )
+                            analyzed["why_correct_ko"] = item.get("why_correct_ko", "")
+                            analyzed["why_user_wrong_ko"] = item.get("why_user_wrong_ko", "")
+                            analyzed_wrong.append(analyzed)
+                        
+                        # 반복 학습 시작
+                        RepeatLearningManager.start_repeat_learning(analyzed_wrong, questions)
+                        st.rerun()
+                else:
+                    # 반복 학습 UI 표시
+                    render_repeat_learning_ui(key_prefix="text")
+                
+                # 학습 결과 페이지로 이동 버튼
+                st.divider()
+                if st.button("📊 학습 결과 대시보드 보기", type="primary", use_container_width=True, key="text_goto_results"):
+                    navigate_to_page("results")
+            else:
+                st.divider()
+                st.success("🎉 모든 문제를 맞혔습니다! 완벽해요!")
+                
+                # 학습 결과 페이지로 이동 버튼
+                if st.button("📊 학습 결과 대시보드 보기", type="primary", use_container_width=True, key="text_goto_results_perfect"):
+                    navigate_to_page("results")
 
-# =====================================================
-# TAB 4: 학습 결과
-# =====================================================
-
-with tab4:
+def render_results_page():
+    """학습 결과 페이지 렌더링"""
+    # 홈 버튼
+    if st.button("🏠 메인 홈으로", key="home_from_results"):
+        navigate_to_home()
+    
     st.header("📊 학습 결과 및 분석")
     
     # 탭 구성 확장: 대시보드 | 반복 학습 | 섀도잉 | 현재 세션 | SRS 복습
@@ -3309,21 +4132,35 @@ with tab4:
         if weakness["total_wrong"] > 0:
             st.caption(f"최근 10개 세션 기준, 총 {weakness['total_wrong']}개 오답 분석")
             
+            # 클릭 가능한 카드로 변경
             for rec in weakness.get("recommendations", [])[:3]:
                 cat_icon = rec.get("icon", "📌")
                 cat_name = rec.get("name", rec.get("category", ""))
+                cat_key = rec.get("category", "")
                 count = rec.get("count", 0)
                 activity = rec.get("activity", "")
                 
                 progress = count / weakness["total_wrong"] if weakness["total_wrong"] > 0 else 0
                 
-                st.markdown(f"""
-                <div style="background: #f8f9fa; padding: 0.8rem; border-radius: 10px; margin: 0.5rem 0;">
-                    <span style="font-size: 1.5rem;">{cat_icon}</span>
-                    <strong>{cat_name}</strong>: {count}개 오답 ({progress*100:.0f}%)
-                    <br><small style="color: #666;">👉 {activity}</small>
-                </div>
-                """, unsafe_allow_html=True)
+                # expander를 사용하여 클릭 가능한 카드 생성
+                with st.expander(f"{cat_icon} **{cat_name}**: {count}개 오답 ({progress*100:.0f}%) — 클릭하여 상세 보기"):
+                    st.markdown(f"**💡 추천 학습 활동**")
+                    st.info(activity)
+                    
+                    # 해당 카테고리의 오답 근거 문장들 표시
+                    cat_quotes = [eq for eq in weakness.get("evidence_quotes", []) if eq.get("category") == cat_key]
+                    if cat_quotes:
+                        st.markdown(f"**📋 오답 근거 문장들 (총 {len(cat_quotes)}개)**")
+                        for i, eq in enumerate(cat_quotes[:5], 1):  # 최대 5개만 표시
+                            st.markdown(f"{i}. *\"{eq.get('text', '')}\"*")
+                        if len(cat_quotes) > 5:
+                            st.caption(f"... 외 {len(cat_quotes) - 5}개 더")
+                    
+                    # 카테고리 정보 표시
+                    cat_info = CEFR_CATEGORIES.get(cat_key, {})
+                    if cat_info.get("description"):
+                        st.markdown(f"**📖 카테고리 설명**")
+                        st.caption(cat_info.get("description", ""))
         else:
             st.success("🎉 최근 오답이 없습니다! 훌륭해요!")
         
@@ -3334,7 +4171,16 @@ with tab4:
         
         cat_stats = SpacedRepetitionSystem.get_category_stats()
         
-        if cat_stats:
+        # 디버그 정보 (개발 중에만 표시)
+        if st.session_state.get("debug_mode_enabled", False):
+            with st.expander("🔍 DEBUG: SRS 카테고리 통계"):
+                st.write(f"총 카테고리 수: {len(cat_stats)}")
+                st.json(cat_stats)
+                srs_data = SpacedRepetitionSystem._load_data()
+                st.write(f"SRS 총 항목 수: {len(srs_data.get('items', {}))}")
+                st.json(list(srs_data.get('items', {}).values())[:3])  # 처음 3개만 표시
+        
+        if cat_stats and len(cat_stats) > 0:
             for cat_key, stats in cat_stats.items():
                 cat_info = CEFR_CATEGORIES.get(cat_key, {"name": cat_key, "icon": "📌"})
                 total = stats["total"]
@@ -3349,7 +4195,7 @@ with tab4:
                 with col_accuracy:
                     st.caption(f"정확도: {accuracy}%")
         else:
-            st.info("SRS에 등록된 항목이 없습니다.")
+            st.info("💡 SRS에 등록된 항목이 없습니다. 퀴즈를 풀고 틀린 문제가 생기면 자동으로 등록됩니다!")
     
     # ==========================================
     # 서브탭 2: 반복 학습 (틀린 문제 정답까지)
@@ -3419,130 +4265,13 @@ with tab4:
         
         # 진행 중인 경우
         else:
-            # 진행 상황 표시
-            st.markdown("#### 📊 진행 상황")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("완료", f"{progress['completed']}/{progress['total']}")
-            with col2:
-                st.metric("남은 문제", progress['remaining'])
-            with col3:
-                st.metric("총 시도", progress['total_retries'])
-            
-            st.progress(progress['progress_percent'] / 100, text=f"진행률: {progress['progress_percent']}%")
-            
-            # 완료 체크
-            if RepeatLearningManager.is_complete():
-                st.balloons()
-                st.success("🎉 모든 문제를 정복했습니다! 훌륭해요!")
-                
-                # 완료 통계
-                state = st.session_state.get(RepeatLearningManager.SESSION_KEY, {})
-                completed = state.get("completed", [])
-                
-                st.markdown("#### 📊 반복 학습 결과")
-                for item in completed:
-                    retries = item.get("retries_needed", 1)
-                    emoji = "🌟" if retries == 1 else "✅" if retries <= 3 else "💪"
-                    st.markdown(f"{emoji} Q{item.get('id')}: {retries}번 만에 성공")
-                
-                col_restart, col_end = st.columns(2)
-                with col_restart:
-                    if st.button("🔄 처음부터 다시", key="repeat_restart"):
-                        RepeatLearningManager.reset()
-                        st.rerun()
-                with col_end:
-                    if st.button("🏠 반복 학습 종료", key="repeat_end"):
-                        RepeatLearningManager.reset()
-                        st.rerun()
-            else:
-                # 현재 문제 풀기
-                current_q = RepeatLearningManager.get_next_question()
-                
-                if current_q:
-                    st.divider()
-                    
-                    # 문제 정보
-                    q_id = current_q.get("id", "?")
-                    is_similar = current_q.get("is_similar", False)
-                    
-                    if is_similar:
-                        st.markdown(f"### 🔄 유사 문제 (원본: Q{current_q.get('original_id', '?')})")
-                    else:
-                        st.markdown(f"### ❓ 문제 Q{q_id}")
-                    
-                    # 카테고리 표시
-                    category = current_q.get("category", "")
-                    if category:
-                        cat_info = CEFR_CATEGORIES.get(category, {"icon": "📌", "name": category})
-                        st.caption(f"{cat_info['icon']} {cat_info['name']}")
-                    
-                    # 문제
-                    st.markdown(f"**{current_q.get('question', '문제 로딩 중...')}**")
-                    
-                    # 선택지
-                    choices = current_q.get("choices", {})
-                    
-                    with st.form(f"repeat_answer_form_{q_id}"):
-                        answer = st.radio(
-                            "답을 선택하세요",
-                            options=["A", "B", "C", "D"],
-                            format_func=lambda x: f"{x}. {choices.get(x, '')}",
-                            horizontal=True,
-                            index=None,
-                            key=f"repeat_answer_{q_id}"
-                        )
-                        
-                        col_submit, col_similar = st.columns([2, 1])
-                        with col_submit:
-                            submitted = st.form_submit_button("✅ 제출", type="primary", use_container_width=True)
-                        with col_similar:
-                            gen_similar = st.form_submit_button("🔄 유사 문제", use_container_width=True)
-                    
-                    # 답안 제출 처리
-                    if submitted:
-                        if not answer:
-                            st.error("답을 선택해주세요!")
-                        else:
-                            is_correct, result = RepeatLearningManager.check_answer(answer)
-                            
-                            if is_correct:
-                                st.success(f"🎉 정답입니다! ({result['retry_count']}번 만에 성공)")
-                                time.sleep(1)
-                                st.rerun()
-                            else:
-                                st.error(f"❌ 오답입니다. 정답: {result['correct_answer']}")
-                                
-                                # 해설 표시
-                                why_correct = current_q.get("why_correct_ko", "")
-                                if why_correct:
-                                    st.info(f"💡 **해설:** {why_correct}")
-                                
-                                evidence = current_q.get("evidence_quote", "")
-                                if evidence:
-                                    st.markdown(f"📄 **근거:** _{evidence}_")
-                    
-                    # 유사 문제 생성
-                    if gen_similar:
-                        with st.spinner("유사 문제 생성 중..."):
-                            similar = generate_similar_question(current_q, model=gen_model)
-                            if similar:
-                                RepeatLearningManager.replace_with_similar(similar)
-                                st.success("✅ 유사 문제가 생성되었습니다!")
-                                st.rerun()
-                    
-                    # 반복 학습 종료 버튼
-                    st.divider()
-                    if st.button("🛑 반복 학습 중단", key="repeat_stop"):
-                        RepeatLearningManager.reset()
-                        st.rerun()
+            # 반복 학습 UI 렌더링 (공통 함수 사용)
+            render_repeat_learning_ui(key_prefix="result_tab")
     
     # ==========================================
     # 서브탭 3: TTS 섀도잉
     # ==========================================
     with subtab3:
-        st.subheader("🗣️ 섀도잉 연습")
-        
         # 현재 코칭 결과 확인
         any_coach = (
             st.session_state.get("audio_coach") or 
@@ -3622,12 +4351,13 @@ with tab4:
                 try:
                     # 텍스트가 너무 길면 잘라서 사용
                     quiz_text = available_transcript[:4000] if len(available_transcript) > 4000 else available_transcript
-                    prompt = QUIZ_PROMPT.format(
+                    prompt = safe_prompt_fill(
+                        QUIZ_PROMPT,
+                        num_questions=str(num_questions),
                         transcript=quiz_text,
-                        num_questions=num_questions,
                         level=level
                     )
-                    
+             
                     if debug:
                         with st.expander("🔍 DEBUG: QUIZ_PROMPT (일부)"):
                             st.code(prompt[:1200])
@@ -3692,10 +4422,11 @@ with tab4:
                             # user_answers를 session_state에 저장 (payload에서 사용하기 위함)
                             st.session_state["tab4_user_answers"] = user_answers
                             
-                            prompt = COACH_PROMPT.format(
-                                transcript=available_transcript[:4000],
+                            prompt = safe_prompt_fill(
+                                COACH_PROMPT,
+                                transcript=(available_transcript[:4000] if available_transcript and len(available_transcript) > 4000 else (available_transcript or "")),
                                 quiz_json=json.dumps(quiz, ensure_ascii=False),
-                                user_answers=json.dumps(user_answers, ensure_ascii=False),
+                                user_answers_json=json.dumps(user_answers, ensure_ascii=False),
                                 condition=condition_simple,
                             )
                             
@@ -3892,11 +4623,12 @@ with tab4:
             **팁:** 매일 조금씩 복습하면 장기 기억에 더 잘 남습니다!
             """)
 
-# =====================================================
-# TAB 5: 설정
-# =====================================================
-
-with tab5:
+def render_settings_page():
+    """설정 페이지 렌더링"""
+    # 홈 버튼
+    if st.button("🏠 메인 홈으로", key="home_from_settings"):
+        navigate_to_home()
+    
     st.header("⚙️ 설정")
     st.markdown("앱 설정 및 로그 파일을 관리합니다.")
     
@@ -4254,6 +4986,29 @@ with tab5:
             st.cache_resource.clear()
             st.success("✅ 캐시가 초기화되었습니다. ASR 모델이 다시 로드됩니다.")
             st.rerun()
+
+# =====================================================
+# 메인 라우터 - 페이지 네비게이션
+# =====================================================
+
+current_page = st.session_state.get("current_page", "home")
+
+if current_page == "home":
+    render_home_page()
+elif current_page == "audio":
+    render_audio_page()
+elif current_page == "youtube":
+    render_youtube_page()
+elif current_page == "text":
+    render_text_page()
+elif current_page == "results":
+    render_results_page()
+elif current_page == "settings":
+    render_settings_page()
+else:
+    # 알 수 없는 페이지면 홈으로 리다이렉트
+    st.session_state["current_page"] = "home"
+    st.rerun()
 
 # =====================================================
 # 푸터

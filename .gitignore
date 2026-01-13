@@ -105,3 +105,35 @@ learning_history.json
 .env.*.local
 secrets.toml
 api_keys.txt
+
+# Audio files (keep locally, don't commit)
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+*.aac
+*.wma
+*.opus
+*.webm
+*.caf
+*.aiff
+*.aif
+*.mp4
+
+# Logs
+logs/
+
+# Windows junk
+Thumbs.db
+Desktop.ini
+
+# Conda / virtualenv artifacts (project-local)
+.conda/
+.venv/
+venv/
+env/
+__pypackages__/
+
+# Streamlit runtime cache
+.streamlit/*.log
