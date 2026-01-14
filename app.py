@@ -57,13 +57,40 @@ COACH_PROMPT = P.COACH_PROMPT
 EDUCATIONAL_ANALYSIS_PROMPT = P.EDUCATIONAL_ANALYSIS_PROMPT
 AI_LEARNING_COACH_PROMPT = P.AI_LEARNING_COACH_PROMPT
 
-
 # 상수 정의
-APP_TITLE = "🎓 인도네시아어 학습 도구 (Indonesian Learning Tool)"
+APP_TITLE = "Bisa Q"  # 브라우저 탭(title)용
 MODEL_ID = "Sparkplugx1904/whisper-base-id"
 TARGET_SR = 16000
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
+
+# =====================================================
+# UI Labels (single source of truth)
+# =====================================================
+
+APP_TITLE = "Bisa Q"  # 브라우저 탭 제목(짧게)
+
+UI = {
+    "home_title": "당신만의 AI 언어 메이트, Bisa Q",
+    "home_subtext": "좋아하는 영상과 글이 훌륭한 교재가 됩니다. 리스닝부터 퀴즈까지, AI와 함께 즐겁게 시작해보세요.",
+    "home_cta": "오늘은 어떤 이야기로 공부해볼까요?",
+
+    "card_audio": "Listening",
+    "card_youtube": "Watching",
+    "card_text": "Reading",
+    "card_results": "Progress",
+    "card_settings": "Settings",
+
+    "results_header": "📊 Progress",
+    "tab_dashboard": "📈 Dashboard",
+    "tab_review": "🔄 Review",
+    "tab_speaking": "🗣️ Speaking",
+    "tab_quiz": "📝 Quiz",
+    "tab_memory": "🧠 Memory",
+
+    "btn_home": "🏠 Home",
+    "btn_view_progress": "📊 View Progress",
+}
 
 # TTS 캐시 디렉토리
 TTS_CACHE_DIR = os.path.join(LOG_DIR, "tts_cache")
@@ -368,70 +395,183 @@ def format_audio_transcript(text: str, sentences_per_paragraph: int = 3) -> str:
     
     return formatted_text
 
+import re
 
-def extract_text_from_url(url: str) -> dict:
+def normalize_url_input(raw: str) -> str:
     """
-    URL에서 텍스트를 추출합니다.
-    
-    Args:
-        url: 웹 페이지 URL
-    
-    Returns:
-        dict: {"success": bool, "text": str, "title": str, "error": str}
+    사용자가 붙여넣은 값이
+    - 순수 URL
+    - [텍스트](URL) 마크다운 링크
+    - <URL> 형태
+    - 앞뒤 공백/개행 포함
+    일 때 URL만 안전하게 추출해 반환
     """
+    if not raw:
+        return ""
+
+    s = raw.strip()
+
+    # <https://...> 형태 제거
+    if s.startswith("<") and s.endswith(">"):
+        s = s[1:-1].strip()
+
+    # [title](url) 형태면 url 부분만 뽑기
+    m = re.search(r"\((https?://[^)]+)\)", s)
+    if m:
+        return m.group(1).strip()
+
+    # 혹시 "https://... ](https://...)" 같이 섞였으면 첫 URL만 추출
+    m2 = re.search(r"(https?://\S+)", s)
+    if m2:
+        return m2.group(1).rstrip(")").strip()
+
+    return s
+
+
+def extract_text_from_url(url: str, timeout: int = 20, min_chars: int = 200) -> dict:
+    """
+    웹 URL에서 텍스트(본문)와 제목을 추출합니다.
+    - 확장자(.html 등)로 차단하지 않음
+    - User-Agent 포함, redirect 허용
+    - HTML 파싱 후 article/main 우선, 없으면 가장 긴 본문 후보 선택
+    """
+    import re
+    import requests
+    from bs4 import BeautifulSoup
+
+    def _normalize_text(s: str) -> str:
+        if not s:
+            return ""
+        s = s.replace("\r\n", "\n").replace("\r", "\n")
+        # 줄 끝 공백 제거
+        s = "\n".join(line.strip() for line in s.split("\n"))
+        # 3줄 이상 빈 줄 -> 2줄로 축소
+        s = re.sub(r"\n{3,}", "\n\n", s)
+        # 연속 공백 축소(문장 내부는 보존)
+        s = re.sub(r"[ \t]{2,}", " ", s)
+        return s.strip()
+
     try:
+        if not url or not isinstance(url, str):
+            return {"success": False, "title": "", "text": "", "error": "URL이 비어있습니다."}
+
+        url = url.strip()
+
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "id,en;q=0.8,ko;q=0.6",
+            "Cache-Control": "no-cache",
         }
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
+
+        resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+        resp.raise_for_status()
+
+        content_type = (resp.headers.get("Content-Type") or "").lower()
+
+        # 인코딩 보정 (특히 iso-8859-1로 잘못 잡히는 케이스 방지)
+        if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "latin-1"):
+            resp.encoding = resp.apparent_encoding or "utf-8"
+
+        html = resp.text or ""
+        if not html.strip():
+            return {
+                "success": False,
+                "title": "",
+                "text": "",
+                "error": "응답 본문이 비어있습니다(차단/권한/네트워크 가능).",
+            }
+
+        # HTML이 아닌 것 같으면 실패 처리 (단, 일부 서버는 content-type이 이상할 수 있어 html 첫 글자도 체크)
+        if ("text/html" not in content_type) and ("<html" not in html.lower() and "<body" not in html.lower()):
+            return {
+                "success": False,
+                "title": "",
+                "text": "",
+                "error": f"HTML 페이지가 아닌 것 같습니다. (Content-Type: {content_type})",
+            }
+
+        # 파서: lxml 우선, 없으면 html.parser
+        try:
+            soup = BeautifulSoup(html, "lxml")
+        except Exception:
+            soup = BeautifulSoup(html, "html.parser")
+
+        # 불필요 태그 제거
+        for tag in soup(["script", "style", "noscript", "svg", "canvas", "iframe", "form"]):
+            tag.decompose()
+        for tag in soup.select("nav, header, footer, aside, .nav, .menu, .footer, .header, .sidebar, .advert, .ads"):
+            tag.decompose()
+
         # 제목 추출
         title = ""
-        if soup.find('h1'):
-            title = soup.find('h1').get_text(strip=True)
-        elif soup.title:
-            title = soup.title.string
-        
-        # 본문 추출 (일반적인 콘텐츠 태그들)
-        # script, style 태그 제거
-        for script in soup(["script", "style", "nav", "footer", "header"]):
-            script.decompose()
-        
-        # 본문 텍스트 추출
-        text = ""
-        
-        # VOA 등의 뉴스 사이트
-        article = soup.find('article') or soup.find('div', class_=re.compile('article|content|post|entry'))
-        if article:
-            text = article.get_text(separator='\n', strip=True)
-        else:
-            # 일반적인 경우
-            text = soup.get_text(separator='\n', strip=True)
-        
-        # 빈 줄 제거 및 정리
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
-        raw_text = '\n'.join(lines)
-        
-        # 가독성 개선을 위한 포맷팅
-        formatted_text = format_text_readable(raw_text, lines_per_paragraph=5)
-        
-        return {
-            "success": True,
-            "text": formatted_text,
-            "title": title,
-            "error": None
-        }
-    
+        if soup.title and soup.title.get_text(strip=True):
+            title = soup.title.get_text(strip=True)
+        # og:title 우선 적용(있으면 더 정확)
+        og_title = soup.select_one('meta[property="og:title"]')
+        if og_title and og_title.get("content"):
+            title = og_title.get("content").strip()
+
+        # 본문 후보 우선순위: article > main > (role=main) > body
+        candidates = []
+
+        def _get_text_from_node(node) -> str:
+            if not node:
+                return ""
+            txt = node.get_text(separator="\n", strip=True)
+            return _normalize_text(txt)
+
+        for selector in ["article", "main", '[role="main"]', ".article", ".content", ".post", ".entry-content"]:
+            node = soup.select_one(selector)
+            txt = _get_text_from_node(node)
+            if txt and len(txt) >= 50:
+                candidates.append(txt)
+
+        # 후보가 없으면: 가장 텍스트가 긴 컨테이너를 선택
+        if not candidates:
+            # 너무 많이 돌면 느려져서 상위 일부만
+            containers = soup.find_all(["article", "main", "section", "div"], limit=300)
+            best_txt = ""
+            for c in containers:
+                txt = _get_text_from_node(c)
+                # 너무 짧은 건 제외
+                if len(txt) > len(best_txt) and len(txt) >= 80:
+                    best_txt = txt
+            if best_txt:
+                candidates.append(best_txt)
+
+        # 마지막 fallback: body 전체
+        if not candidates:
+            body_txt = _get_text_from_node(soup.body)
+            if body_txt:
+                candidates.append(body_txt)
+
+        text = max(candidates, key=len, default="")
+        text = _normalize_text(text)
+
+        # 너무 짧으면 실패로 처리(“추출은 됐지만 내용이 없어서 학습 불가” 방지)
+        if len(text) < min_chars:
+            return {
+                "success": False,
+                "title": title or "",
+                "text": "",
+                "error": (
+                    f"추출된 텍스트가 너무 짧습니다({len(text)}자). "
+                    "해당 페이지가 JS 렌더링/로그인 필요/차단/본문이 이미지일 수 있습니다."
+                ),
+            }
+
+        return {"success": True, "title": title or "Untitled", "text": text, "error": ""}
+
+    except requests.exceptions.RequestException as e:
+        return {"success": False, "title": "", "text": "", "error": f"요청 실패: {e}"}
     except Exception as e:
-        return {
-            "success": False,
-            "text": "",
-            "title": "",
-            "error": str(e)
-        }
+        return {"success": False, "title": "", "text": "", "error": f"추출 중 오류: {e}"}
+
 
 
 def extract_youtube_id(url: str) -> str:
@@ -1542,43 +1682,54 @@ def generate_similar_question(original_question: dict, model: str = "gpt-4o-mini
 
 
 # =====================================================
-# 3-8. TTS 섀도잉 기능
+# 3-8. TTS 섀도잉 기능 (edge-tts 안정화)
 # =====================================================
 
-async def generate_tts_audio(text: str, output_file: str, voice: str = "id-ID-ArdiNeural", rate: str = "+0%"):
-    """
-    edge-tts를 사용하여 오디오 파일 생성
-    
-    Args:
-        text: 읽을 텍스트 (인도네시아어)
-        output_file: 출력 파일 경로
-        voice: 음성 모델 (기본: id-ID-ArdiNeural)
-               - id-ID-ArdiNeural (남성, 자연스러운 음성)
-               - id-ID-GadisNeural (여성, 자연스러운 음성)
-        rate: 재생 속도 (+0%: 보통, -50%: 느리게, +50%: 빠르게)
-    """
+async def generate_tts_audio(
+    text: str,
+    output_file: str,
+    voice: str = "id-ID-ArdiNeural",
+    rate: str = "+0%",
+):
     communicate = edge_tts.Communicate(text, voice, rate=rate)
     await communicate.save(output_file)
 
-def get_tts_audio_path(text: str, speed: str = "normal") -> str:
+
+def _run_async(coro):
+    """
+    Streamlit/Windows 환경에서 이벤트루프 꼬임을 줄이기 위한 최소 안전 실행기.
+    - 실행 중 루프가 없으면 asyncio.run
+    - 실행 중 루프가 있으면 새 루프를 만들어 run_until_complete
+    """
+    try:
+        running = asyncio.get_running_loop()
+        # 여기에 오면 "이미 실행 중인 루프"가 있다는 뜻
+        new_loop = asyncio.new_event_loop()
+        try:
+            return new_loop.run_until_complete(coro)
+        finally:
+            new_loop.close()
+    except RuntimeError:
+        # 실행 중 루프 없음
+        return asyncio.run(coro)
+
+
+def get_tts_audio_path(
+    text: str,
+    speed: str = "normal",
+    voice: str = "id-ID-ArdiNeural",
+) -> str | None:
     """
     TTS 오디오 파일 경로 반환 (캐시 사용)
-    
-    Args:
-        text: 읽을 텍스트
-        speed: 재생 속도
-    
-    Returns:
-        오디오 파일 경로
+    - 캐시 키에 voice + rate 포함 (중요!)
+    - 파일이 0바이트/너무 작으면 재생성
     """
-    # 텍스트와 속도를 조합하여 해시 생성 (캐시 키)
-    cache_key = hashlib.md5(f"{text}_{speed}".encode()).hexdigest()
-    audio_file = os.path.join(TTS_CACHE_DIR, f"{cache_key}.mp3")
-    
-    # 캐시된 파일이 있으면 반환
-    if os.path.exists(audio_file):
-        return audio_file
-    
+    if not text or not text.strip():
+        return None
+
+    # 캐시 폴더 보장
+    os.makedirs(TTS_CACHE_DIR, exist_ok=True)
+
     # 속도에 따른 rate 설정
     speed_rates = {
         "very_slow": "-50%",
@@ -1587,235 +1738,96 @@ def get_tts_audio_path(text: str, speed: str = "normal") -> str:
         "fast": "+25%",
     }
     rate = speed_rates.get(speed, "+0%")
-    
-    # 비동기 함수를 동기적으로 실행
-    try:
-        # 이벤트 루프 생성 또는 가져오기
+
+    # ✅ 캐시 키에 voice + rate 포함 (이게 핵심)
+    cache_key_src = f"v1|{voice}|{rate}|{speed}|{text}"
+    cache_key = hashlib.md5(cache_key_src.encode("utf-8")).hexdigest()
+    audio_file = os.path.join(TTS_CACHE_DIR, f"{cache_key}.mp3")
+
+    # 캐시된 파일이 있으면 (정상 크기인지도 체크)
+    if os.path.exists(audio_file):
         try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        # 오디오 파일 생성
-        loop.run_until_complete(generate_tts_audio(text, audio_file, rate=rate))
-        return audio_file
+            if os.path.getsize(audio_file) > 1024:  # 1KB 이상이면 정상으로 간주
+                return audio_file
+        except OSError:
+            pass
+        # 너무 작거나 깨진 파일이면 삭제 후 재생성
+        try:
+            os.remove(audio_file)
+        except OSError:
+            pass
+
+    # 생성
+    try:
+        _run_async(generate_tts_audio(text, audio_file, voice=voice, rate=rate))
+        if os.path.exists(audio_file) and os.path.getsize(audio_file) > 1024:
+            return audio_file
+        return None
     except Exception as e:
         st.error(f"TTS 오디오 생성 실패: {e}")
         return None
 
-def render_tts_player_edgetts(text: str, translation: str = "", speed: str = "normal", key_suffix: str = ""):
+
+def render_tts_player_edgetts(
+    text: str,
+    translation: str = "",
+    speed: str = "normal",
+    key_suffix: str = "",
+    voice: str = "id-ID-ArdiNeural",
+):
     """
     edge-tts를 사용한 TTS 재생 플레이어 렌더링
-    
-    Args:
-        text: 읽을 텍스트 (인도네시아어)
-        translation: 한국어 번역
-        speed: 재생 속도 키
-        key_suffix: 고유 키 접미사
+    - 실패 시 예외를 raise하지 않고 None 처리(상위에서 제어)
     """
-    # 텍스트 표시
     st.markdown(f"""
-    <div style="background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); 
+    <div style="background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
                 padding: 1rem; border-radius: 12px; margin: 0.5rem 0;
                 border-left: 4px solid #667eea;">
         <p style="font-size: 1.1rem; color: #1e3c72; margin-bottom: 0.5rem; font-weight: 500;">
             🇮🇩 {text}
         </p>
         {f'<p style="color: #666; font-size: 0.9rem; margin: 0;">🇰🇷 {translation}</p>' if translation else ''}
+        <p style="color:#888; font-size:0.8rem; margin:0.4rem 0 0 0;">
+            TTS Voice: {voice} / Speed: {speed}
+        </p>
     </div>
     """, unsafe_allow_html=True)
-    
-    # 오디오 파일 생성 또는 캐시에서 가져오기
+
     with st.spinner("🎤 음성 생성 중..."):
-        audio_file = get_tts_audio_path(text, speed)
-    
+        audio_file = get_tts_audio_path(text, speed=speed, voice=voice)
+
     if audio_file and os.path.exists(audio_file):
-        # Streamlit audio 컴포넌트로 재생
         st.audio(audio_file, format="audio/mp3")
+        return True
     else:
         st.error("⚠️ 음성 생성에 실패했습니다.")
+        return False
+
 
 def render_tts_player(text: str, translation: str = "", speed: str = "normal", key_suffix: str = ""):
     """
-    TTS 재생 플레이어 렌더링 (edge-tts 우선, 실패 시 Web Speech API 사용)
-    
-    한국어 음성을 fallback으로 사용하지 않고, 인도네시아어 음성만 사용합니다.
-    
-    Args:
-        text: 읽을 텍스트 (인도네시아어)
-        translation: 한국어 번역
-        speed: 재생 속도 키
-        key_suffix: 고유 키 접미사
+    TTS 재생 플레이어 렌더링 (edge-tts 우선)
+    - 기본은 edge-tts만 사용(권장)
+    - edge-tts 실패 시에만 fallback (원하면)
     """
-    # edge-tts를 우선 사용
-    try:
-        render_tts_player_edgetts(text, translation, speed, key_suffix)
+    # ✅ edge-tts 우선
+    ok = render_tts_player_edgetts(text, translation, speed, key_suffix, voice="id-ID-ArdiNeural")
+    if ok:
         return
-    except Exception as e:
-        st.warning(f"⚠️ edge-tts 사용 실패, Web Speech API로 전환합니다. ({e})")
-    
-    # fallback: Web Speech API (한국어 음성 제외)
-    rate = TTS_SPEED_OPTIONS.get(speed, {}).get("rate", 1.0)
-    
-    # 텍스트 표시
-    st.markdown(f"""
-    <div style="background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); 
-                padding: 1rem; border-radius: 12px; margin: 0.5rem 0;
-                border-left: 4px solid #667eea;">
-        <p style="font-size: 1.1rem; color: #1e3c72; margin-bottom: 0.5rem; font-weight: 500;">
-            🇮🇩 {text}
-        </p>
-        {f'<p style="color: #666; font-size: 0.9rem; margin: 0;">🇰🇷 {translation}</p>' if translation else ''}
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # JavaScript TTS 버튼
-    button_id = abs(hash(text + key_suffix)) % 1000000
-    
-    # HTML/JS로 TTS 구현 (인도네시아어 음성 강제 선택)
-    components.html(f"""
-    <div style="margin: 0.5rem 0;">
-        <button onclick="speakText_{button_id}()" 
-                style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                       color: white; border: none; padding: 0.6rem 1.2rem;
-                       border-radius: 25px; cursor: pointer; font-size: 0.9rem;
-                       box-shadow: 0 2px 10px rgba(102, 126, 234, 0.3);
-                       transition: transform 0.2s, box-shadow 0.2s;"
-                onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 15px rgba(102, 126, 234, 0.4)';"
-                onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 10px rgba(102, 126, 234, 0.3)';">
-            🔊 재생 ({TTS_SPEED_OPTIONS[speed]['label']})
-        </button>
-        <button onclick="stopSpeech()" 
-                style="background: #dc3545; color: white; border: none; 
-                       padding: 0.6rem 1rem; border-radius: 25px; cursor: pointer;
-                       font-size: 0.9rem; margin-left: 0.5rem;">
-            ⏹ 정지
-        </button>
-    </div>
-    <script>
-        // 음성 목록을 전역 변수로 저장
-        let cachedVoices_{button_id} = [];
-        
-        // 음성 로드 함수
-        function loadVoices_{button_id}() {{
-            return new Promise((resolve) => {{
-                let voices = window.speechSynthesis.getVoices();
-                if (voices.length > 0) {{
-                    cachedVoices_{button_id} = voices;
-                    console.log('🎤 음성 로드 완료:', voices.length, '개');
-                    resolve(voices);
-                }} else {{
-                    window.speechSynthesis.onvoiceschanged = () => {{
-                        voices = window.speechSynthesis.getVoices();
-                        cachedVoices_{button_id} = voices;
-                        console.log('🎤 음성 로드 완료 (delayed):', voices.length, '개');
-                        resolve(voices);
-                    }};
-                    // 타임아웃 설정 (2초 후에도 로드 안되면 빈 배열)
-                    setTimeout(() => {{
-                        if (cachedVoices_{button_id}.length === 0) {{
-                            console.warn('⚠️ 음성 로드 타임아웃');
-                            resolve([]);
-                        }}
-                    }}, 2000);
-                }}
-            }});
-        }}
-        
-        // 페이지 로드 시 음성 미리 로드
-        loadVoices_{button_id}();
-        
-        async function speakText_{button_id}() {{
-            window.speechSynthesis.cancel();
-            
-            // 음성 목록 로드 대기
-            if (cachedVoices_{button_id}.length === 0) {{
-                await loadVoices_{button_id}();
-            }}
-            
-            const text = `{text.replace('`', "'")}`;
-            const utterance = new SpeechSynthesisUtterance(text);
-            const voices = cachedVoices_{button_id};
-            
-            // 인도네시아어 음성 우선순위 검색
-            let indonesianVoice = null;
-            
-            console.log('🔍 총', voices.length, '개 음성 검색 중...');
-            
-            // 1순위: id-ID 정확히 일치
-            indonesianVoice = voices.find(voice => voice.lang === 'id-ID');
-            if (indonesianVoice) console.log('✅ 1순위 매치:', indonesianVoice.name);
-            
-            // 2순위: id로 시작 (id-ID, id 등)
-            if (!indonesianVoice) {{
-                indonesianVoice = voices.find(voice => voice.lang.toLowerCase().startsWith('id'));
-                if (indonesianVoice) console.log('✅ 2순위 매치:', indonesianVoice.name);
-            }}
-            
-            // 3순위: 이름에 Indonesia 포함
-            if (!indonesianVoice) {{
-                indonesianVoice = voices.find(voice => 
-                    voice.name.toLowerCase().includes('indonesia') ||
-                    voice.name.toLowerCase().includes('indonesian')
-                );
-                if (indonesianVoice) console.log('✅ 3순위 매치:', indonesianVoice.name);
-            }}
-            
-            // 4순위: 말레이시아어 (유사 언어)
-            if (!indonesianVoice) {{
-                indonesianVoice = voices.find(voice => 
-                    voice.lang.toLowerCase().startsWith('ms') ||
-                    voice.name.toLowerCase().includes('malay')
-                );
-                if (indonesianVoice) console.log('✅ 4순위 매치 (말레이):', indonesianVoice.name);
-            }}
-            
-            // 음성 설정
-            if (indonesianVoice) {{
-                utterance.voice = indonesianVoice;
-                utterance.lang = indonesianVoice.lang;
-                console.log('🎯 최종 선택:', indonesianVoice.name, '(', indonesianVoice.lang, ')');
-                
-                utterance.rate = {rate};
-                utterance.pitch = 1;
-                utterance.volume = 1;
-                
-                // 재생 시작/종료 이벤트 로깅
-                utterance.onstart = () => console.log('▶️ TTS 재생 시작');
-                utterance.onend = () => console.log('⏹️ TTS 재생 완료');
-                utterance.onerror = (e) => console.error('❌ TTS 오류:', e);
-                
-                window.speechSynthesis.speak(utterance);
-            }} else {{
-                // 인도네시아어 음성이 없으면 재생하지 않음 (한국어 fallback 방지)
-                console.error('❌ 인도네시아어 음성을 찾을 수 없습니다!');
-                console.log('📋 사용 가능한 음성:');
-                voices.forEach(v => console.log('  -', v.name, '(', v.lang, ')'));
-                alert('⚠️ 브라우저에 인도네시아어 음성이 설치되어 있지 않습니다.\\n\\nedge-tts가 설치되지 않았거나 실패했습니다.\\n\\n해결 방법:\\n1. 터미널에서 "pip install edge-tts" 실행\\n2. 또는 브라우저 설정에서 인도네시아어 음성 추가:\\n   - Windows: 설정 > 시간 및 언어 > 음성\\n   - Mac: 시스템 환경설정 > 손쉬운 사용 > 음성');
-                return;  // 재생하지 않음
-            }}
-        }}
-        
-        function stopSpeech() {{
-            window.speechSynthesis.cancel();
-        }}
-        
-        // 음성 목록 로드 대기 (일부 브라우저에서 필수)
-        if (window.speechSynthesis.getVoices().length === 0) {{
-            window.speechSynthesis.addEventListener('voiceschanged', function() {{
-                const voices = window.speechSynthesis.getVoices();
-                console.log('🔊 음성 목록 로드됨:', voices.length, '개');
-                const idVoices = voices.filter(v => v.lang.startsWith('id'));
-                if (idVoices.length > 0) {{
-                    console.log('✅ 인도네시아어 음성:', idVoices.map(v => v.name).join(', '));
-                }} else {{
-                    console.warn('⚠️ 인도네시아어 음성이 없습니다. 시스템 설정에서 추가하세요.');
-                }}
-            }});
-        }}
-    </script>
-    """, height=70)
+
+    # (선택) fallback을 완전히 막고 싶으면 여기서 return 처리
+    # st.warning("edge-tts 실패로 TTS를 중단합니다(한국어/기본 음성 폴백 방지).")
+    # return
+
+    # (선택) fallback: Web Speech API로 넘어가고 싶다면, 기존 WebSpeech 코드를 여기 두되,
+    # 반드시 Indonesian voice 없으면 재생 금지하도록 유지하세요.
+    st.warning("⚠️ edge-tts 실패로 Web Speech API로 전환합니다. (환경에 따라 음성이 달라질 수 있음)")
+    # ... 기존 Web Speech API 블록 ...
+
+
+# =====================================================
+# 3-9. AI 학습 코치 UI 렌더링
+# =====================================================
 
 
 def render_ai_learning_coach(wrong_items: list, score_info: dict, condition: str, key_prefix: str = ""):
@@ -1909,6 +1921,12 @@ def render_ai_learning_coach(wrong_items: list, score_info: dict, condition: str
             st.markdown("##### 📚 추천 학습 자료")
             for resource in ai_coach.get("recommended_resources", []):
                 st.markdown(f"- **[{resource.get('type', '')}] {resource.get('name', '')}**: {resource.get('description', '')}")
+
+
+
+# =====================================================
+# 3-9. 반복 학습 UI 렌더링
+# =====================================================
 
 
 def render_repeat_learning_ui(key_prefix: str = ""):
@@ -2064,6 +2082,11 @@ def render_repeat_learning_ui(key_prefix: str = ""):
                 st.rerun()
     
     return True
+
+
+# =====================================================
+# 3-9. 섀도잉 연습 섹션 렌더링
+# =====================================================
 
 
 def render_shadowing_section(coach_result: dict, speed: str = "normal"):
@@ -2436,17 +2459,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title(APP_TITLE)
-
-st.markdown("""
-이 앱은 인도네시아어 초급 학습자를 위한 도구입니다.  
-**오디오 파일**, **YouTube 링크**, **텍스트 웹 링크**를 입력하면 교육적 가치를 분석하고 퀴즈를 생성합니다.
-""")
 
 # =====================================================
 # 사이드바 설정
 # =====================================================
-logo_label = "🎓 언어학습앱"
+logo_label = "🎓 BISA Q"
 st.markdown(f"""
 <style>
 div[data-testid="stSidebar"] button[aria-label="{logo_label}"] {{
@@ -2608,66 +2625,52 @@ def navigate_to_page(page_name: str):
     st.session_state["current_page"] = page_name
     st.rerun()
 
+
+def render_home_button_bottom(key: str = "home_bottom"):
+    """페이지 하단 중앙에 홈 버튼 렌더링"""
+    st.divider()
+    left, center, right = st.columns([1, 2, 1])
+    with center:
+        if st.button(UI["btn_home"], key=key, use_container_width=True):
+            navigate_to_home()
+
 # =====================================================
 # 메인 홈 화면
 # =====================================================
 
 def render_home_page():
-    """메인 홈 화면 렌더링 (큰 카드 형태)"""
-    st.title("🇮🇩 인도네시아어 리스닝 코치")
-    st.markdown("### 환영합니다! 학습 방법을 선택하세요")
-    
+    st.title(UI["home_title"])
+    st.markdown(UI["home_subtext"])
+    st.markdown(f"### {UI['home_cta']}")
+
     st.divider()
-    
-    # 3개의 학습 카드를 큰 형태로 표시 (클릭 가능한 버튼)
+
     col1, col2, col3 = st.columns(3)
-    
+
     with col1:
-        # 카드 버튼 (전체가 클릭 가능)
-        if st.button("🎵\n\n**오디오 학습**\n\nWAV 파일로 듣기 연습", 
-                     key="btn_audio", 
-                     use_container_width=True, 
-                     type="primary",
-                     help="오디오 파일을 업로드하여 학습하기"):
+        if st.button(f"🎵\n\n**{UI['card_audio']}**\n\nWAV 파일로 듣기 연습",
+                     key="btn_audio", use_container_width=True, type="primary"):
             navigate_to_page("audio")
-    
+
     with col2:
-        # 카드 버튼 (전체가 클릭 가능)
-        if st.button("📺\n\n**YouTube 학습**\n\n유튜브 영상으로 듣기 연습", 
-                     key="btn_youtube", 
-                     use_container_width=True, 
-                     type="primary",
-                     help="YouTube 영상으로 학습하기"):
+        if st.button(f"📺\n\n**{UI['card_youtube']}**\n\n유튜브 영상으로 듣기 연습",
+                     key="btn_youtube", use_container_width=True, type="primary"):
             navigate_to_page("youtube")
-    
+
     with col3:
-        # 카드 버튼 (전체가 클릭 가능)
-        if st.button("📄\n\n**텍스트 학습**\n\n인도네시아어 텍스트로 연습", 
-                     key="btn_text", 
-                     use_container_width=True, 
-                     type="primary",
-                     help="웹 텍스트로 학습하기"):
+        if st.button(f"📄\n\n**{UI['card_text']}**\n\n인도네시아어 텍스트로 연습",
+                     key="btn_text", use_container_width=True, type="primary"):
             navigate_to_page("text")
-    
+
     st.divider()
-    
-    # 학습 결과 및 설정 카드 (클릭 가능한 버튼)
+
     col4, col5 = st.columns(2)
-    
     with col4:
-        # 카드 버튼 (전체가 클릭 가능)
-        if st.button("📊\n\n**학습 결과**", 
-                     key="btn_results", 
-                     use_container_width=True,
-                     help="학습 통계 및 분석 보기"):
+        if st.button(f"📊\n\n**{UI['card_results']}**", key="btn_results", use_container_width=True):
             navigate_to_page("results")
-    
+
     with col5:
-        # 카드 버튼 (전체가 클릭 가능)
-        if st.button("⚙️\n\n**설정**", 
-                     key="btn_settings", 
-                     use_container_width=True,
-                     help="앱 설정 및 로그 관리"):
+        if st.button(f"⚙️\n\n**{UI['card_settings']}**", key="btn_settings", use_container_width=True):
             navigate_to_page("settings")
     
     st.divider()
@@ -2692,9 +2695,6 @@ def render_home_page():
 
 def render_audio_page():
     """오디오 학습 페이지 렌더링"""
-    # 홈 버튼
-    if st.button("🏠 메인 홈으로", key="home_from_audio"):
-        navigate_to_home()
     
     st.header("🎵 오디오로 학습하기")
     st.markdown("WAV 파일을 업로드하면 음성을 텍스트로 변환하고 퀴즈를 생성합니다.")
@@ -3057,21 +3057,23 @@ def render_audio_page():
                 
                 # 학습 결과 페이지로 이동 버튼
                 st.divider()
-                if st.button("📊 학습 결과 대시보드 보기", type="primary", use_container_width=True, key="audio_goto_results"):
+                if st.button(UI["btn_view_progress"], type="primary", use_container_width=True, key="audio_goto_results"):
                     navigate_to_page("results")
             else:
                 st.divider()
                 st.success("🎉 모든 문제를 맞혔습니다! 완벽해요!")
                 
                 # 학습 결과 페이지로 이동 버튼
-                if st.button("📊 학습 결과 대시보드 보기", type="primary", use_container_width=True, key="audio_goto_results_perfect"):
+                if st.button(UI["btn_view_progress"], type="primary", use_container_width=True, key="audio_goto_results_perfect"):
                     navigate_to_page("results")
+
+    # ✅ 페이지 하단 중앙 홈 버튼
+    render_home_button_bottom(key="home_from_audio_bottom")
+
+
 
 def render_youtube_page():
     """YouTube 학습 페이지 렌더링"""
-    # 홈 버튼
-    if st.button("🏠 메인 홈으로", key="home_from_youtube"):
-        navigate_to_home()
     
     st.header("📺 YouTube로 학습하기")
     st.markdown("YouTube 영상을 시청하고 인도네시아어 요약을 작성한 후 퀴즈를 풀어보세요!")
@@ -3633,14 +3635,14 @@ Topik utama adalah...""",
                 
                 # 학습 결과 페이지로 이동 버튼
                 st.divider()
-                if st.button("📊 학습 결과 대시보드 보기", type="primary", use_container_width=True, key="youtube_goto_results"):
+                if st.button(UI["btn_view_progress"], type="primary", use_container_width=True, key="youtube_goto_results"):
                     navigate_to_page("results")
             else:
                 st.divider()
                 st.success("🎉 모든 문제를 맞혔습니다! 완벽해요!")
                 
                 # 학습 결과 페이지로 이동 버튼
-                if st.button("📊 학습 결과 대시보드 보기", type="primary", use_container_width=True, key="youtube_goto_results_perfect"):
+                if st.button(UI["btn_view_progress"], type="primary", use_container_width=True, key="youtube_goto_results_perfect"):
                     navigate_to_page("results")
     else:
         st.info("""
@@ -3652,12 +3654,15 @@ Topik utama adalah...""",
         
         💡 **팁**: 최소 5문장 이상 작성하면 좋은 퀴즈가 생성됩니다!
         """)
+    
+    # ✅ 페이지 하단 중앙 홈 버튼
+    render_home_button_bottom(key="home_from_youtube")
+
+
+
 
 def render_text_page():
     """텍스트 학습 페이지 렌더링"""
-    # 홈 버튼
-    if st.button("🏠 메인 홈으로", key="home_from_text"):
-        navigate_to_home()
     
     st.header("📄 텍스트로 학습하기")
     st.markdown("웹 링크를 입력하면 텍스트를 추출하여 학습 자료로 사용합니다.")
@@ -3690,23 +3695,26 @@ def render_text_page():
     
     # 추출 버튼 처리
     if extract_btn:
-        if text_url:
-            with st.spinner(f"'{text_url}'에서 텍스트를 추출 중..."):
-                result = extract_text_from_url(text_url)
-            
-            if result["success"]:
-                st.session_state["extracted_text"] = result["text"]
-                st.session_state["extracted_title"] = result["title"]
-                st.session_state["current_source"] = f"Web: {text_url}"
-                st.session_state["current_text_url"] = text_url  # 현재 URL 저장
-                st.session_state.pop("text_quiz", None)
-                st.session_state.pop("text_coach", None)
-                st.success(f"✅ 추출 완료: {result['title']}")
-                st.rerun()
-            else:
-                st.error(f"❌ 추출 실패: {result['error']}")
+      if text_url:
+        clean_url = normalize_url_input(text_url)
+
+        with st.spinner(f"'{clean_url}'에서 텍스트를 추출 중..."):
+            result = extract_text_from_url(clean_url)
+
+        if result["success"]:
+            st.session_state["extracted_text"] = result["text"]
+            st.session_state["extracted_title"] = result["title"]
+            st.session_state["current_source"] = f"Web: {clean_url}"
+            st.session_state["current_text_url"] = clean_url  # 현재 URL 저장
+            st.session_state.pop("text_quiz", None)
+            st.session_state.pop("text_coach", None)
+            st.success(f"✅ 추출 완료: {result['title']}")
+            st.rerun()
         else:
-            st.warning("⚠️ URL을 입력해주세요.")
+            st.error(f"❌ 추출 실패: {result['error']}")
+      else:
+        st.warning("⚠️ URL을 입력해주세요.")
+
     
     # 2단계: 추출된 텍스트
     extracted_text = st.session_state.get("extracted_text", "")
@@ -4025,32 +4033,37 @@ def render_text_page():
                 
                 # 학습 결과 페이지로 이동 버튼
                 st.divider()
-                if st.button("📊 학습 결과 대시보드 보기", type="primary", use_container_width=True, key="text_goto_results"):
+                if st.button(UI["btn_view_progress"], type="primary", use_container_width=True, key="text_goto_results"):
                     navigate_to_page("results")
             else:
                 st.divider()
                 st.success("🎉 모든 문제를 맞혔습니다! 완벽해요!")
                 
                 # 학습 결과 페이지로 이동 버튼
-                if st.button("📊 학습 결과 대시보드 보기", type="primary", use_container_width=True, key="text_goto_results_perfect"):
+                if st.button(UI["btn_view_progress"], type="primary", use_container_width=True, key="text_goto_results_perfect"):
                     navigate_to_page("results")
+
+
+    # ✅ 페이지 하단 중앙 홈 버튼
+    render_home_button_bottom(key="home_from_text")
 
 def render_results_page():
     """학습 결과 페이지 렌더링"""
-    # 홈 버튼
-    if st.button("🏠 메인 홈으로", key="home_from_results"):
-        navigate_to_home()
     
-    st.header("📊 학습 결과 및 분석")
+    st.header(UI["results_header"])
     
     # 탭 구성 확장: 대시보드 | 반복 학습 | 섀도잉 | 현재 세션 | SRS 복습
     subtab1, subtab2, subtab3, subtab4, subtab5 = st.tabs([
-        "📈 대시보드",
-        "🔄 반복 학습",
-        "🗣️ 섀도잉",
-        "📝 현재 세션",
-        "📅 SRS 복습"
+        UI["tab_dashboard"],
+    	UI["tab_review"],
+    	UI["tab_speaking"],
+    	UI["tab_quiz"],
+    	UI["tab_memory"],
     ])
+
+    # ✅ 페이지 하단 중앙 홈 버튼
+    render_home_button_bottom(key="home_from_results_bottom")
+
     
     # ==========================================
     # 서브탭 1: 학습 대시보드
@@ -4626,7 +4639,7 @@ def render_results_page():
 def render_settings_page():
     """설정 페이지 렌더링"""
     # 홈 버튼
-    if st.button("🏠 메인 홈으로", key="home_from_settings"):
+    if st.button(UI["btn_home"], key="home_from_settings"):
         navigate_to_home()
     
     st.header("⚙️ 설정")
