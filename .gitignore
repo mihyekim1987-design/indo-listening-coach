@@ -137,3 +137,6 @@ __pypackages__/
 
 # Streamlit runtime cache
 .streamlit/*.log
+
+
+*.bundle
