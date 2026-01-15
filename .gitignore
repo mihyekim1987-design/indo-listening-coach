@@ -140,3 +140,8 @@ __pypackages__/
 
 
 *.bundle
+
+# UI reference images
+Reference*.png
+Logo.png
+ui_reference_images.zip

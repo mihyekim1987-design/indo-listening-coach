@@ -32,6 +32,10 @@ import edge_tts
 import hashlib
 from pathlib import Path
 
+from ui.header import inject_global_css, render_header
+from ui.mode_state import MODES, get_mode_state, reset_mode_ephemeral, record_mode_result
+from ui.effects import celebrate_confetti
+
 # OpenAI 설정
 load_dotenv()
 from openai import OpenAI
@@ -63,6 +67,7 @@ MODEL_ID = "Sparkplugx1904/whisper-base-id"
 TARGET_SR = 16000
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
+LOGO_PATH = Path("Logo.png")
 
 # =====================================================
 # UI Labels (single source of truth)
@@ -71,9 +76,16 @@ os.makedirs(LOG_DIR, exist_ok=True)
 APP_TITLE = "Bisa Q"  # 브라우저 탭 제목(짧게)
 
 UI = {
-    "home_title": "당신만의 AI 언어 메이트, Bisa Q",
-    "home_subtext": "좋아하는 영상과 글이 훌륭한 교재가 됩니다. 리스닝부터 퀴즈까지, AI와 함께 즐겁게 시작해보세요.",
-    "home_cta": "오늘은 어떤 이야기로 공부해볼까요?",
+    "nav_listening": "Listening",
+    "nav_watching": "Watching",
+    "nav_reading": "Reading",
+    "nav_progress": "Progress",
+    "nav_settings": "Settings",
+    "cta_make_it_bisa": "Make it Bisa",
+
+    "home_title": "Don't Just Listen.<br>Speak Indonesian.",
+    "home_subtext": "Turn your favorite videos and podcasts<br>into interactive AI lessons.<br>Move from passive input<br>to active fluency with Bisa Q.",
+    "home_cta_prompt": "Make it Bisa",
 
     "card_audio": "Listening",
     "card_youtube": "Watching",
@@ -81,15 +93,15 @@ UI = {
     "card_results": "Progress",
     "card_settings": "Settings",
 
-    "results_header": "📊 Progress",
-    "tab_dashboard": "📈 Dashboard",
-    "tab_review": "🔄 Review",
-    "tab_speaking": "🗣️ Speaking",
-    "tab_quiz": "📝 Quiz",
-    "tab_memory": "🧠 Memory",
+    "progress_header": "Progress",
+    "tab_dashboard": "Dashboard",
+    "tab_review": "Review",
+    "tab_speaking": "Speaking",
+    "tab_quiz": "Quiz",
+    "tab_memory": "Memory",
 
-    "btn_home": "🏠 Home",
-    "btn_view_progress": "📊 View Progress",
+    "btn_home": "Home",
+    "btn_view_progress": "View Progress",
 }
 
 # TTS 캐시 디렉토리
@@ -1083,27 +1095,36 @@ class WeaknessAnalyzer:
 
 class RepeatLearningManager:
     """반복 학습 관리자 - 틀린 문제를 정답까지 반복"""
-    
-    SESSION_KEY = "repeat_learning_state"
-    
+
+    @staticmethod
+    def _default_state() -> dict:
+        return {
+            "wrong_queue": [],        # 틀린 문제 대기열
+            "current_question": None, # 현재 풀고 있는 문제
+            "retry_count": {},        # 문제별 재시도 횟수
+            "completed": [],          # 완료된 문제
+            "total_retries": 0,       # 총 시도 횟수
+            "active": False,          # 반복 학습 모드 활성화
+            "celebration_shown": False,
+        }
+
     @classmethod
-    def init_state(cls):
+    def init_state(cls, mode: str) -> dict:
         """세션 상태 초기화"""
-        if cls.SESSION_KEY not in st.session_state:
-            st.session_state[cls.SESSION_KEY] = {
-                "wrong_queue": [],        # 틀린 문제 대기열
-                "current_question": None, # 현재 풀고 있는 문제
-                "retry_count": {},        # 문제별 재시도 횟수
-                "completed": [],          # 완료된 문제
-                "total_retries": 0,       # 총 시도 횟수
-                "active": False,          # 반복 학습 모드 활성화
-            }
-    
+        mode_state = get_mode_state(mode)
+        if "repeat_learning" not in mode_state:
+            mode_state["repeat_learning"] = cls._default_state()
+        return mode_state["repeat_learning"]
+
     @classmethod
-    def start_repeat_learning(cls, wrong_items: list, quiz_questions: list):
+    def get_state(cls, mode: str) -> dict:
+        return cls.init_state(mode)
+
+    @classmethod
+    def start_repeat_learning(cls, mode: str, wrong_items: list, quiz_questions: list):
         """반복 학습 시작"""
-        cls.init_state()
-        state = st.session_state[cls.SESSION_KEY]
+        state = cls.init_state(mode)
+        mode_state = get_mode_state(mode)
         
         # 초기화
         state["wrong_queue"] = []
@@ -1111,10 +1132,11 @@ class RepeatLearningManager:
         state["retry_count"] = {}
         state["total_retries"] = 0
         state["active"] = True
-        
-        # balloons 플래그 초기화
-        if "repeat_learning_balloons_shown" in st.session_state:
-            del st.session_state["repeat_learning_balloons_shown"]
+        state["celebration_shown"] = False
+        mode_state["retry_active"] = True
+        mode_state["retry_completed"] = False
+        mode_state["retry_mastered"] = False
+        mode_state["retry_quiz"] = {"questions": quiz_questions}
         
         # quiz_questions를 딕셔너리로 변환
         q_dict = {str(q.get("id")): q for q in quiz_questions}
@@ -1139,10 +1161,9 @@ class RepeatLearningManager:
             state["retry_count"][q_id] = 0
     
     @classmethod
-    def get_next_question(cls) -> Optional[dict]:
+    def get_next_question(cls, mode: str) -> Optional[dict]:
         """다음 풀어야 할 문제 반환"""
-        cls.init_state()
-        state = st.session_state[cls.SESSION_KEY]
+        state = cls.init_state(mode)
         
         if state["wrong_queue"]:
             state["current_question"] = state["wrong_queue"][0]
@@ -1150,10 +1171,9 @@ class RepeatLearningManager:
         return None
     
     @classmethod
-    def check_answer(cls, user_answer: str) -> tuple:
+    def check_answer(cls, mode: str, user_answer: str) -> tuple:
         """답안 확인"""
-        cls.init_state()
-        state = st.session_state[cls.SESSION_KEY]
+        state = cls.init_state(mode)
         current = state["current_question"]
         
         if not current:
@@ -1187,10 +1207,9 @@ class RepeatLearningManager:
         return is_correct, result
     
     @classmethod
-    def replace_with_similar(cls, similar_question: dict):
+    def replace_with_similar(cls, mode: str, similar_question: dict):
         """현재 문제를 유사 문제로 교체"""
-        cls.init_state()
-        state = st.session_state[cls.SESSION_KEY]
+        state = cls.init_state(mode)
         
         if state["wrong_queue"]:
             original_id = state["wrong_queue"][0].get("id")
@@ -1200,10 +1219,9 @@ class RepeatLearningManager:
             state["current_question"] = similar_question
     
     @classmethod
-    def get_progress(cls) -> dict:
+    def get_progress(cls, mode: str) -> dict:
         """진행 상황 반환"""
-        cls.init_state()
-        state = st.session_state[cls.SESSION_KEY]
+        state = cls.init_state(mode)
         
         total = len(state["completed"]) + len(state["wrong_queue"])
         completed = len(state["completed"])
@@ -1218,31 +1236,23 @@ class RepeatLearningManager:
         }
     
     @classmethod
-    def is_complete(cls) -> bool:
+    def is_complete(cls, mode: str) -> bool:
         """모든 문제 완료 여부"""
-        cls.init_state()
-        state = st.session_state[cls.SESSION_KEY]
+        state = cls.init_state(mode)
         # active 상태이고, wrong_queue가 비어있고, completed가 있을 때만 완료
         return (state.get("active", False) and 
                 len(state["wrong_queue"]) == 0 and 
                 len(state["completed"]) > 0)
     
     @classmethod
-    def reset(cls):
+    def reset(cls, mode: str):
         """상태 초기화"""
-        if cls.SESSION_KEY in st.session_state:
-            st.session_state[cls.SESSION_KEY] = {
-                "wrong_queue": [],
-                "current_question": None,
-                "retry_count": {},
-                "completed": [],
-                "total_retries": 0,
-                "active": False,
-            }
-        
-        # balloons 플래그도 초기화
-        if "repeat_learning_balloons_shown" in st.session_state:
-            del st.session_state["repeat_learning_balloons_shown"]
+        mode_state = get_mode_state(mode)
+        mode_state["repeat_learning"] = cls._default_state()
+        mode_state["retry_active"] = False
+        mode_state["retry_completed"] = False
+        mode_state["retry_mastered"] = False
+        mode_state["retry_quiz"] = None
 
 
 # =====================================================
@@ -1929,14 +1939,14 @@ def render_ai_learning_coach(wrong_items: list, score_info: dict, condition: str
 # =====================================================
 
 
-def render_repeat_learning_ui(key_prefix: str = ""):
+def render_repeat_learning_ui(mode: str, key_prefix: str = ""):
     """
     반복 학습 UI 렌더링 (인라인으로 사용 가능)
     
     Args:
         key_prefix: 키 접두사 (중복 방지)
     """
-    progress = RepeatLearningManager.get_progress()
+    progress = RepeatLearningManager.get_progress(mode)
     
     if not progress["active"]:
         return False  # 반복 학습이 활성화되지 않음
@@ -1955,16 +1965,19 @@ def render_repeat_learning_ui(key_prefix: str = ""):
     st.progress(progress['progress_percent'] / 100, text=f"진행률: {progress['progress_percent']}%")
     
     # 완료 체크
-    if RepeatLearningManager.is_complete():
-        # balloons는 한 번만 표시 (플래그 사용)
-        if not st.session_state.get("repeat_learning_balloons_shown", False):
-            st.balloons()
-            st.session_state["repeat_learning_balloons_shown"] = True
+    if RepeatLearningManager.is_complete(mode):
+        state = RepeatLearningManager.get_state(mode)
+        if not state.get("celebration_shown", False):
+            celebrate_confetti(key=f"repeat_complete_{mode}_{state.get('total_retries', 0)}")
+            state["celebration_shown"] = True
+        mode_state = get_mode_state(mode)
+        mode_state["retry_active"] = False
+        mode_state["retry_completed"] = True
+        mode_state["retry_mastered"] = True
         
         st.success("🎉 모든 문제를 정복했습니다! 훌륭해요!")
         
         # 완료 통계
-        state = st.session_state.get(RepeatLearningManager.SESSION_KEY, {})
         completed = state.get("completed", [])
         
         st.markdown("#### 📊 반복 학습 결과")
@@ -1976,19 +1989,19 @@ def render_repeat_learning_ui(key_prefix: str = ""):
         col_restart, col_results, col_end = st.columns(3)
         with col_restart:
             if st.button("🔄 처음부터 다시", key=f"{key_prefix}_repeat_restart", use_container_width=True):
-                RepeatLearningManager.reset()
+                RepeatLearningManager.reset(mode)
                 st.rerun()
         with col_results:
             if st.button("📊 학습 결과 보기", type="primary", key=f"{key_prefix}_repeat_goto_results", use_container_width=True):
                 navigate_to_page("results")
         with col_end:
             if st.button("🏠 학습 종료", key=f"{key_prefix}_repeat_end", use_container_width=True):
-                RepeatLearningManager.reset()
+                RepeatLearningManager.reset(mode)
                 st.rerun()
         return True
     
     # 현재 문제 풀기
-    current_q = RepeatLearningManager.get_next_question()
+    current_q = RepeatLearningManager.get_next_question(mode)
     
     if not current_q:
         return False
@@ -2015,7 +2028,7 @@ def render_repeat_learning_ui(key_prefix: str = ""):
     if not question_text:
         st.error("⚠️ 문제를 불러올 수 없습니다. 반복 학습을 다시 시작해주세요.")
         if st.button("🔄 반복 학습 재시작", key=f"{key_prefix}_restart_error"):
-            RepeatLearningManager.reset()
+            RepeatLearningManager.reset(mode)
             st.rerun()
         return False
     
@@ -2044,7 +2057,7 @@ def render_repeat_learning_ui(key_prefix: str = ""):
     
     # 중단 처리
     if stop_learning:
-        RepeatLearningManager.reset()
+        RepeatLearningManager.reset(mode)
         st.info("반복 학습을 중단했습니다.")
         st.rerun()
     
@@ -2053,7 +2066,7 @@ def render_repeat_learning_ui(key_prefix: str = ""):
         if not answer:
             st.error("답을 선택해주세요!")
         else:
-            is_correct, result = RepeatLearningManager.check_answer(answer)
+            is_correct, result = RepeatLearningManager.check_answer(mode, answer)
             
             if is_correct:
                 st.success(f"🎉 정답입니다! ({result['retry_count']}번 만에 성공)")
@@ -2077,7 +2090,7 @@ def render_repeat_learning_ui(key_prefix: str = ""):
             model_name = st.session_state.get("gen_model", "gpt-4o-mini")
             similar = generate_similar_question(current_q, model=model_name)
             if similar:
-                RepeatLearningManager.replace_with_similar(similar)
+                RepeatLearningManager.replace_with_similar(mode, similar)
                 st.success("✅ 유사 문제가 생성되었습니다!")
                 st.rerun()
     
@@ -2154,6 +2167,30 @@ def render_shadowing_section(coach_result: dict, speed: str = "normal"):
                     speed=speed,
                     key_suffix=f"shadow_{i}"
                 )
+
+
+def render_mode_shadowing_items(mode: str, items: List[Dict], speed: str) -> None:
+    if not items:
+        st.info("아직 이 모드에서 섀도잉 문장이 없습니다.")
+        return
+
+    for i, item in enumerate(items, 1):
+        sentence = (item.get("sentence") or item.get("evidence_quote") or "").strip()
+        if not sentence:
+            continue
+        question_id = item.get("question_id")
+        header = f"연습 {i}"
+        if question_id:
+            header = f"Q{question_id} · {header}"
+        with st.expander(header, expanded=(i == 1)):
+            if item.get("evidence_quote") and item.get("evidence_quote") != sentence:
+                st.caption(f"근거: {item.get('evidence_quote')}")
+            render_tts_player(
+                text=sentence,
+                translation=item.get("source_snippet", ""),
+                speed=speed,
+                key_suffix=f"{mode}_shadow_{i}",
+            )
 
 
 # =====================================================
@@ -2297,250 +2334,16 @@ def sanitize_coach_structured(coach: dict, quiz: dict, user_answers: dict):
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
-# ========== 커스텀 CSS ==========
-st.markdown("""
-<style>
-    /* 전체 배경 */
-    .stApp {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    }
-    
-    /* Hero Section */
-    .hero-section {
-        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-        padding: 3rem 2rem;
-        border-radius: 20px;
-        text-align: center;
-        margin-bottom: 2rem;
-        box-shadow: 0 10px 40px rgba(0,0,0,0.3);
-    }
-    
-    .hero-title {
-        font-size: 3rem;
-        font-weight: 800;
-        color: white;
-        margin-bottom: 0.5rem;
-        text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-    }
-    
-    .hero-subtitle {
-        font-size: 1.3rem;
-        color: #a8d8ea;
-        margin-bottom: 1rem;
-    }
-    
-    /* 기능 카드 */
-    .feature-card {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 15px;
-        text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-        transition: transform 0.3s ease;
-        height: 100%;
-    }
-    
-    .feature-card:hover {
-        transform: translateY(-5px);
-    }
-    
-    .feature-icon {
-        font-size: 2.5rem;
-        margin-bottom: 1rem;
-    }
-    
-    .feature-title {
-        font-size: 1.2rem;
-        font-weight: 700;
-        color: #1e3c72;
-        margin-bottom: 0.5rem;
-    }
-    
-    .feature-desc {
-        color: #666;
-        font-size: 0.9rem;
-    }
-    
-    /* 퀴즈 카드 */
-    .quiz-card {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 15px;
-        margin-bottom: 1rem;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-    }
-    
-    .quiz-number {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: black;
-        padding: 0.3rem 0.8rem;
-        border-radius: 20px;
-        font-weight: 700;
-        display: inline-block;
-        margin-bottom: 0.5rem;
-    }
-    
-    /* 결과 카드 */
-    .result-correct {
-        background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-        color: black;
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-    }
-    
-    .result-incorrect {
-        background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
-        color: black;
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-    }
-    
-    /* 학습 플랜 카드 */
-    .plan-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: black;
-        padding: 2rem;
-        border-radius: 20px;
-        margin: 1rem 0;
-    }
-    
-    /* 컨디션 상태 */
-    .condition-card {
-        background: white;
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-        border-left: 4px solid #667eea;
-    }
-    
-    /* 임베드 컨테이너 */
-    .embed-container {
-        background: white;
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 1rem 0;
-        max-height: 400px;
-        overflow-y: auto;
-    }
-    
-    /* 버튼 스타일 */
-    .stButton > button {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border: none;
-        padding: 0.8rem 2rem;
-        border-radius: 25px;
-        font-weight: 700;
-        transition: all 0.3s ease;
-    }
-    
-    .stButton > button:hover {
-        transform: scale(1.05);
-        box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
-    }
-    
-    /* 진행률 바 */
-    .progress-container {
-        background: #e0e0e0;
-        border-radius: 10px;
-        height: 20px;
-        margin: 1rem 0;
-        overflow: hidden;
-    }
-    
-    .progress-bar {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        height: 100%;
-        border-radius: 10px;
-        transition: width 0.5s ease;
-    }
-</style>
-""", unsafe_allow_html=True)
+inject_global_css(Path("ui/styles.css"))
 
 
 # =====================================================
 # 사이드바 설정
 # =====================================================
-logo_label = "🎓 BISA Q"
-st.markdown(f"""
-<style>
-div[data-testid="stSidebar"] button[aria-label="{logo_label}"] {{
-  background: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-
-  padding: 0 !important;
-  margin: 10px 0 18px 0 !important;
-
-  width: auto !important;
-  min-height: 0 !important;
-
-  border-radius: 0 !important;
-}}
-
-div[data-testid="stSidebar"] button[aria-label="{logo_label}"] p {{
-  margin: 0 !important;
-  font-size: 22px !important;
-  font-weight: 800 !important;
-  line-height: 1.1 !important;
-}}
-
-div[data-testid="stSidebar"] button[aria-label="{logo_label}"]:hover,
-div[data-testid="stSidebar"] button[aria-label="{logo_label}"]:active,
-div[data-testid="stSidebar"] button[aria-label="{logo_label}"]:focus,
-div[data-testid="stSidebar"] button[aria-label="{logo_label}"]:focus-visible {{
-  background: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  outline: none !important;
-}}
-
-/* 보험: 사이드바 첫 버튼을 로고로 간주 */
-div[data-testid="stSidebar"] [data-testid="stButton"]:first-of-type button {{
-  background: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  padding: 0 !important;
-  width: auto !important;
-  border-radius: 0 !important;
-}}
-</style>
-""", unsafe_allow_html=True)
-
-# 로고 클릭 카운터 초기화
-if "logo_click_count" not in st.session_state:
-    st.session_state["logo_click_count"] = 0
-if "last_logo_click_time" not in st.session_state:
-    st.session_state["last_logo_click_time"] = 0
 if "debug_mode_enabled" not in st.session_state:
     st.session_state["debug_mode_enabled"] = False
 
 with st.sidebar:
-    # 로고 버튼 (히든 디버그 토글)
-    if st.button(logo_label, key="logo_button", type="secondary"):
-        current_time = time.time()
-
-        # 3초 이내에 클릭하면 카운터 증가, 아니면 리셋
-        if current_time - st.session_state["last_logo_click_time"] < 3:
-            st.session_state["logo_click_count"] += 1
-        else:
-            st.session_state["logo_click_count"] = 1
-
-        st.session_state["last_logo_click_time"] = current_time
-
-        # 5번 클릭하면 디버그 모드 토글
-        if st.session_state["logo_click_count"] >= 5:
-            st.session_state["debug_mode_enabled"] = not st.session_state["debug_mode_enabled"]
-            st.session_state["logo_click_count"] = 0
-
-            st.toast(
-                "🔍 디버그 모드 활성화!" if st.session_state["debug_mode_enabled"] else "🔒 디버그 모드 비활성화",
-                icon="🔓" if st.session_state["debug_mode_enabled"] else "🔒"
-            )
-            st.rerun()
-
     # 이하 학습 설정/모델 설정 코드 계속...
 
     
@@ -2626,6 +2429,15 @@ def navigate_to_page(page_name: str):
     st.rerun()
 
 
+NAV_ITEMS = [
+    ("audio", UI["nav_listening"]),
+    ("youtube", UI["nav_watching"]),
+    ("text", UI["nav_reading"]),
+    ("results", UI["nav_progress"]),
+    ("settings", UI["nav_settings"]),
+]
+
+
 def render_home_button_bottom(key: str = "home_bottom"):
     """페이지 하단 중앙에 홈 버튼 렌더링"""
     st.divider()
@@ -2634,60 +2446,77 @@ def render_home_button_bottom(key: str = "home_bottom"):
         if st.button(UI["btn_home"], key=key, use_container_width=True):
             navigate_to_home()
 
+def render_footer():
+    """푸터 렌더링"""
+    st.markdown(
+        """
+<div class="app-footer">
+  <div class="footer-inner">
+    <div class="section-label">Make it Bisa</div>
+    <div style="font-size: 18px; margin: 12px 0 24px 0;">
+      꾸준한 학습으로 당신만의 Bisa를 만들어보세요.
+    </div>
+    <div style="margin-bottom: 16px;">
+      <a href="#">Privacy Policy</a>
+      <a href="#">Terms of Use</a>
+      <a href="#">Accessibility</a>
+    </div>
+    <div style="font-size: 14px; line-height: 1.6;">
+      <strong>🔒 개인정보 보호 및 저작권 준수</strong>
+      <div>- YouTube 영상은 임베드 형태로만 제공되며, 자동 다운로드하지 않습니다.</div>
+      <div>- 웹 크롤링은 공개된 교육 자료에 한해 제공되며, 저작권을 준수합니다.</div>
+      <div>- 생성된 퀴즈 및 코칭 내용은 원본 텍스트를 1:1 복사하지 않고 재작성됩니다.</div>
+    </div>
+  </div>
+</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 # =====================================================
 # 메인 홈 화면
 # =====================================================
 
 def render_home_page():
-    st.title(UI["home_title"])
-    st.markdown(UI["home_subtext"])
-    st.markdown(f"### {UI['home_cta']}")
+    st.markdown(
+        f"""
+<div class="home-hero">
+  <div class="hero-content">
+    <div class="hero-title">{UI["home_title"]}</div>
+    <div class="hero-subtext">{UI["home_subtext"]}</div>
+    <a class="hero-cta" href="#card-grid">{UI["home_cta_prompt"]}</a>
+  </div>
+  <div class="hero-media" role="img" aria-label="Learner listening on a laptop">
+    <div class="hero-media-frame"></div>
+  </div>
+</div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    st.divider()
-
-    col1, col2, col3 = st.columns(3)
-
+    st.markdown('<div id="card-grid"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="home-card-grid">', unsafe_allow_html=True)
+    col1, col2, col3 = st.columns(3, gap="large")
     with col1:
-        if st.button(f"🎵\n\n**{UI['card_audio']}**\n\nWAV 파일로 듣기 연습",
-                     key="btn_audio", use_container_width=True, type="primary"):
+        if st.button(UI["card_audio"], key="btn_audio", use_container_width=True):
             navigate_to_page("audio")
-
     with col2:
-        if st.button(f"📺\n\n**{UI['card_youtube']}**\n\n유튜브 영상으로 듣기 연습",
-                     key="btn_youtube", use_container_width=True, type="primary"):
+        if st.button(UI["card_youtube"], key="btn_youtube", use_container_width=True):
             navigate_to_page("youtube")
-
     with col3:
-        if st.button(f"📄\n\n**{UI['card_text']}**\n\n인도네시아어 텍스트로 연습",
-                     key="btn_text", use_container_width=True, type="primary"):
+        if st.button(UI["card_text"], key="btn_text", use_container_width=True):
             navigate_to_page("text")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    st.divider()
-
-    col4, col5 = st.columns(2)
+    st.markdown('<div class="home-card-grid">', unsafe_allow_html=True)
+    left_spacer, col4, col5, right_spacer = st.columns([1, 2, 2, 1], gap="large")
     with col4:
-        if st.button(f"📊\n\n**{UI['card_results']}**", key="btn_results", use_container_width=True):
+        if st.button(UI["card_results"], key="btn_results", use_container_width=True):
             navigate_to_page("results")
-
     with col5:
-        if st.button(f"⚙️\n\n**{UI['card_settings']}**", key="btn_settings", use_container_width=True):
+        if st.button(UI["card_settings"], key="btn_settings", use_container_width=True):
             navigate_to_page("settings")
-    
-    st.divider()
-    
-    # 최근 학습 통계 요약
-    st.markdown("### 📈 최근 학습 통계")
-    history_stats = LearningHistoryManager.get_stats()
-    
-    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-    with col_s1:
-        st.metric("총 세션", f"{history_stats['total_sessions']}회")
-    with col_s2:
-        st.metric("평균 점수", f"{history_stats['avg_score']}%")
-    with col_s3:
-        st.metric("연속 학습일", f"{history_stats['streak_days']}일")
-    with col_s4:
-        st.metric("이번 주 세션", f"{history_stats['sessions_this_week']}회")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # =====================================================
 # 페이지 함수들
@@ -2750,6 +2579,7 @@ def render_audio_page():
                     # 퀴즈 초기화
                     st.session_state.pop("audio_quiz", None)
                     st.session_state.pop("audio_coach", None)
+                    reset_mode_ephemeral("audio")
                 
                 dt = time.perf_counter() - t0
                 st.success(f"✅ 변환 완료! ({dt:.1f}초 소요)")
@@ -2895,6 +2725,17 @@ def render_audio_page():
                                 "score": coach.get("score", {}),
                                 "wrong_items": wrong_items_analyzed,
                             })
+
+                            record_mode_result("audio", {
+                                "source": "audio",
+                                "level": level,
+                                "condition": condition,
+                                "score": coach.get("score", {}),
+                                "wrong_items": wrong_items_analyzed,
+                                "quiz_questions": audio_quiz.get("questions", []),
+                                "coach": coach,
+                                "timestamp": datetime.now().isoformat(),
+                            })
                             
                             st.success("✅ 채점 완료!")
                             st.rerun()
@@ -3026,7 +2867,7 @@ def render_audio_page():
                 st.divider()
                 
                 # 반복 학습이 이미 진행 중인지 확인
-                repeat_progress = RepeatLearningManager.get_progress()
+                repeat_progress = RepeatLearningManager.get_progress("audio")
                 
                 if not repeat_progress["active"]:
                     # 반복 학습 시작 버튼
@@ -3049,11 +2890,11 @@ def render_audio_page():
                             analyzed_wrong.append(analyzed)
                         
                         # 반복 학습 시작
-                        RepeatLearningManager.start_repeat_learning(analyzed_wrong, questions)
+                        RepeatLearningManager.start_repeat_learning("audio", analyzed_wrong, questions)
                         st.rerun()
                 else:
                     # 반복 학습 UI 표시
-                    render_repeat_learning_ui(key_prefix="audio")
+                    render_repeat_learning_ui("audio", key_prefix="audio")
                 
                 # 학습 결과 페이지로 이동 버튼
                 st.divider()
@@ -3314,6 +3155,7 @@ Topik utama adalah...""",
                     # 이전 퀴즈 강제 초기화 (새 영상의 퀴즈 생성 보장)
                     st.session_state.pop("youtube_quiz", None)
                     st.session_state.pop("youtube_coach", None)
+                    reset_mode_ephemeral("video")
                     st.rerun()
             else:
                 quiz_btn_disabled_key = f"btn_generate_youtube_quiz_disabled_{video_id}"
@@ -3387,6 +3229,7 @@ Topik utama adalah...""",
             youtube_quiz = None
             st.session_state.pop("youtube_quiz", None)
             st.session_state.pop("youtube_coach", None)
+            reset_mode_ephemeral("video")
     
     if youtube_quiz:
         st.divider()
@@ -3467,6 +3310,17 @@ Topik utama adalah...""",
                                 "condition": condition,
                                 "score": coach.get("score", {}),
                                 "wrong_items": wrong_items_analyzed,
+                            })
+
+                            record_mode_result("video", {
+                                "source": "video",
+                                "level": level,
+                                "condition": condition,
+                                "score": coach.get("score", {}),
+                                "wrong_items": wrong_items_analyzed,
+                                "quiz_questions": youtube_quiz.get("questions", []),
+                                "coach": coach,
+                                "timestamp": datetime.now().isoformat(),
                             })
                             
                             st.success("✅ 채점 완료!")
@@ -3604,7 +3458,7 @@ Topik utama adalah...""",
                 st.divider()
                 
                 # 반복 학습이 이미 진행 중인지 확인
-                repeat_progress = RepeatLearningManager.get_progress()
+                repeat_progress = RepeatLearningManager.get_progress("video")
                 
                 if not repeat_progress["active"]:
                     # 반복 학습 시작 버튼
@@ -3627,11 +3481,11 @@ Topik utama adalah...""",
                             analyzed_wrong.append(analyzed)
                         
                         # 반복 학습 시작
-                        RepeatLearningManager.start_repeat_learning(analyzed_wrong, questions)
+                        RepeatLearningManager.start_repeat_learning("video", analyzed_wrong, questions)
                         st.rerun()
                 else:
                     # 반복 학습 UI 표시
-                    render_repeat_learning_ui(key_prefix="youtube")
+                    render_repeat_learning_ui("video", key_prefix="youtube")
                 
                 # 학습 결과 페이지로 이동 버튼
                 st.divider()
@@ -3708,6 +3562,7 @@ def render_text_page():
             st.session_state["current_text_url"] = clean_url  # 현재 URL 저장
             st.session_state.pop("text_quiz", None)
             st.session_state.pop("text_coach", None)
+            reset_mode_ephemeral("text")
             st.success(f"✅ 추출 완료: {result['title']}")
             st.rerun()
         else:
@@ -3870,6 +3725,17 @@ def render_text_page():
                                 "score": coach.get("score", {}),
                                 "wrong_items": wrong_items_analyzed,
                             })
+
+                            record_mode_result("text", {
+                                "source": "text",
+                                "level": level,
+                                "condition": condition,
+                                "score": coach.get("score", {}),
+                                "wrong_items": wrong_items_analyzed,
+                                "quiz_questions": text_quiz.get("questions", []),
+                                "coach": coach,
+                                "timestamp": datetime.now().isoformat(),
+                            })
                             
                             st.success("✅ 채점 완료!")
                             st.rerun()
@@ -4002,7 +3868,7 @@ def render_text_page():
                 st.divider()
                 
                 # 반복 학습이 이미 진행 중인지 확인
-                repeat_progress = RepeatLearningManager.get_progress()
+                repeat_progress = RepeatLearningManager.get_progress("text")
                 
                 if not repeat_progress["active"]:
                     # 반복 학습 시작 버튼
@@ -4025,11 +3891,11 @@ def render_text_page():
                             analyzed_wrong.append(analyzed)
                         
                         # 반복 학습 시작
-                        RepeatLearningManager.start_repeat_learning(analyzed_wrong, questions)
+                        RepeatLearningManager.start_repeat_learning("text", analyzed_wrong, questions)
                         st.rerun()
                 else:
                     # 반복 학습 UI 표시
-                    render_repeat_learning_ui(key_prefix="text")
+                    render_repeat_learning_ui("text", key_prefix="text")
                 
                 # 학습 결과 페이지로 이동 버튼
                 st.divider()
@@ -4049,26 +3915,39 @@ def render_text_page():
 
 def render_results_page():
     """학습 결과 페이지 렌더링"""
-    
-    st.header(UI["results_header"])
-    
-    # 탭 구성 확장: 대시보드 | 반복 학습 | 섀도잉 | 현재 세션 | SRS 복습
-    subtab1, subtab2, subtab3, subtab4, subtab5 = st.tabs([
-        UI["tab_dashboard"],
-    	UI["tab_review"],
-    	UI["tab_speaking"],
-    	UI["tab_quiz"],
-    	UI["tab_memory"],
-    ])
 
-    # ✅ 페이지 하단 중앙 홈 버튼
-    render_home_button_bottom(key="home_from_results_bottom")
+    st.markdown(f'<div class="section-title">{UI["progress_header"]}</div>', unsafe_allow_html=True)
 
-    
+    tab_items = [
+        ("dashboard", UI["tab_dashboard"]),
+        ("review", UI["tab_review"]),
+        ("speaking", UI["tab_speaking"]),
+        ("quiz", UI["tab_quiz"]),
+        ("memory", UI["tab_memory"]),
+    ]
+
+    if "progress_tab" not in st.session_state:
+        st.session_state["progress_tab"] = "dashboard"
+
+    active_tab = st.session_state["progress_tab"]
+
+    st.markdown('<div id="progress-tabs-anchor"></div>', unsafe_allow_html=True)
+    tab_cols = st.columns(5)
+    for (tab_key, label), col in zip(tab_items, tab_cols):
+        with col:
+            if st.button(
+                label,
+                key=f"progress_tab_{tab_key}",
+                type="primary" if active_tab == tab_key else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state["progress_tab"] = tab_key
+                st.rerun()
+
     # ==========================================
-    # 서브탭 1: 학습 대시보드
+    # 탭 1: 학습 대시보드
     # ==========================================
-    with subtab1:
+    if active_tab == "dashboard":
         st.subheader("📈 학습 대시보드")
         
         # 전체 통계 로드
@@ -4209,118 +4088,139 @@ def render_results_page():
                     st.caption(f"정확도: {accuracy}%")
         else:
             st.info("💡 SRS에 등록된 항목이 없습니다. 퀴즈를 풀고 틀린 문제가 생기면 자동으로 등록됩니다!")
-    
+
     # ==========================================
-    # 서브탭 2: 반복 학습 (틀린 문제 정답까지)
+    # 탭 2: 반복 학습 (틀린 문제 정답까지)
     # ==========================================
-    with subtab2:
+    if active_tab == "review":
         st.subheader("🔄 틀린 문제 반복 학습")
         st.info("💡 틀린 문제를 모두 맞출 때까지 반복합니다. 유사 문제로 추가 연습도 가능합니다.")
-        
-        # 현재 진행 상황 확인
-        progress = RepeatLearningManager.get_progress()
-        
-        # 시작되지 않은 경우 - 틀린 문제 불러오기
-        if not progress["active"]:
-            st.markdown("#### 📋 반복 학습 시작하기")
-            
-            # 현재 코칭 결과에서 오답 확인
-            any_coach = (
-                st.session_state.get("audio_coach") or 
-                st.session_state.get("youtube_coach") or 
-                st.session_state.get("text_coach")
-            )
-            any_quiz = (
-                st.session_state.get("audio_quiz") or 
-                st.session_state.get("youtube_quiz") or 
-                st.session_state.get("text_quiz")
-            )
-            
-            if any_coach and any_coach.get("wrong_items"):
-                wrong_items = any_coach.get("wrong_items", [])
-                quiz_questions = any_quiz.get("questions", []) if any_quiz else []
-                
-                st.success(f"✅ {len(wrong_items)}개의 틀린 문제가 있습니다.")
-                
-                # 틀린 문제 미리보기
-                with st.expander("🔍 틀린 문제 미리보기", expanded=False):
-                    for item in wrong_items:
-                        q_id = item.get("id")
-                        # quiz에서 원본 문제 찾기
-                        orig_q = next((q for q in quiz_questions if str(q.get("id")) == str(q_id)), {})
-                        question_text = orig_q.get("question", item.get("question", "문제 없음"))
-                        
-                        st.markdown(f"""
-                        **Q{q_id}.** {question_text[:80]}...
-                        - 내 답: {item.get('user_answer', '?')} ❌
-                        - 정답: {item.get('correct_answer', '?')} ✅
-                        """)
-                
-                if st.button("🚀 반복 학습 시작!", type="primary", use_container_width=True):
-                    # 취약점 분석 추가
-                    analyzed_wrong = []
-                    for item in wrong_items:
-                        q_id = str(item.get("id"))
-                        orig_q = next((q for q in quiz_questions if str(q.get("id")) == q_id), {})
-                        analyzed = WeaknessAnalyzer.analyze_wrong_answer(
-                            orig_q, 
-                            item.get("user_answer", ""),
-                            item.get("correct_answer", "")
-                        )
-                        analyzed["why_correct_ko"] = item.get("why_correct_ko", "")
-                        analyzed["why_user_wrong_ko"] = item.get("why_user_wrong_ko", "")
-                        analyzed_wrong.append(analyzed)
-                    
-                    RepeatLearningManager.start_repeat_learning(analyzed_wrong, quiz_questions)
-                    st.rerun()
+
+        mode_labels = {
+            "audio": "Audio",
+            "video": "Video",
+            "text": "Text",
+            "speaking": "Speaking",
+        }
+
+        for mode in MODES:
+            mode_state = get_mode_state(mode)
+            summary = mode_state.get("review_summary", {})
+            last_result = mode_state.get("last_result") or {}
+            wrong_items = mode_state.get("wrong_items", [])
+            quiz_questions = last_result.get("quiz_questions", [])
+            repeat_progress = RepeatLearningManager.get_progress(mode)
+
+            st.markdown(f"#### {mode_labels.get(mode, mode.title())}")
+
+            if summary.get("score"):
+                score = summary.get("score", {})
+                correct = score.get("correct", 0)
+                total = score.get("total", 0)
+                percent = score.get("percent", 0)
+                col1, col2, col3 = st.columns(3)
+                col1.metric("정답 수", f"{correct}/{total}")
+                col2.metric("정답률", f"{percent}%")
+                col3.metric("오답 수", f"{summary.get('wrong_count', 0)}")
+                if summary.get("timestamp"):
+                    st.caption(f"마지막 시도: {summary.get('timestamp')}")
             else:
-                st.warning("⚠️ 먼저 퀴즈를 풀고 채점을 받아주세요. 틀린 문제가 있어야 반복 학습이 가능합니다.")
-        
-        # 진행 중인 경우
-        else:
-            # 반복 학습 UI 렌더링 (공통 함수 사용)
-            render_repeat_learning_ui(key_prefix="result_tab")
-    
-    # ==========================================
-    # 서브탭 3: TTS 섀도잉
-    # ==========================================
-    with subtab3:
-        # 현재 코칭 결과 확인
-        any_coach = (
-            st.session_state.get("audio_coach") or 
-            st.session_state.get("youtube_coach") or 
-            st.session_state.get("text_coach")
-        )
-        
-        if any_coach:
-            render_shadowing_section(any_coach)
-        else:
-            st.info("💡 먼저 퀴즈를 풀고 채점을 받으면 섀도잉 연습 문장이 생성됩니다.")
-            
-            # 직접 입력 옵션
+                st.caption("아직 학습 결과가 없습니다.")
+
+            if repeat_progress["active"]:
+                render_repeat_learning_ui(mode, key_prefix=f"review_{mode}")
+                st.divider()
+                continue
+
+            if not wrong_items:
+                st.info("오답이 없습니다. 다른 모드에서 퀴즈를 풀어보세요.")
+                st.divider()
+                continue
+
+            if not quiz_questions:
+                st.warning("⚠️ 퀴즈 정보가 없어 반복 학습을 시작할 수 없습니다.")
+                st.divider()
+                continue
+
+            st.success(f"✅ {len(wrong_items)}개의 틀린 문제가 있습니다.")
+            with st.expander(f"🔍 {mode_labels.get(mode, mode.title())} 오답 미리보기", expanded=False):
+                for item in wrong_items:
+                    q_id = item.get("id")
+                    orig_q = next((q for q in quiz_questions if str(q.get("id")) == str(q_id)), {})
+                    question_text = orig_q.get("question", item.get("question", "문제 없음"))
+                    st.markdown(f"""
+                    **Q{q_id}.** {question_text[:80]}...
+                    - 내 답: {item.get('user_answer', '?')} ❌
+                    - 정답: {item.get('correct_answer', '?')} ✅
+                    """)
+
+            if st.button(
+                "🚀 반복 학습 시작!",
+                type="primary",
+                use_container_width=True,
+                key=f"review_start_repeat_{mode}",
+            ):
+                RepeatLearningManager.start_repeat_learning(mode, wrong_items, quiz_questions)
+                st.rerun()
+
             st.divider()
-            st.markdown("#### ✍️ 직접 입력하여 연습")
-            
-            custom_text = st.text_area(
-                "인도네시아어 문장 입력",
-                placeholder="Selamat pagi! Apa kabar?",
-                height=100
-            )
-            
-            if custom_text:
-                speed = st.selectbox(
-                    "재생 속도",
-                    options=list(TTS_SPEED_OPTIONS.keys()),
-                    format_func=lambda x: TTS_SPEED_OPTIONS[x]["label"],
-                    index=2,
-                    key="custom_tts_speed"
-                )
-                render_tts_player(custom_text, "", speed, "custom")
     
     # ==========================================
-    # 서브탭 4: 현재 세션 퀴즈 (기존 기능)
+    # 탭 3: TTS 섀도잉
     # ==========================================
-    with subtab4:
+    if active_tab == "speaking":
+        st.subheader("🗣️ 섀도잉 연습")
+
+        mode_labels = {
+            "audio": "Audio",
+            "video": "Video",
+            "text": "Text",
+            "speaking": "Speaking",
+            "all": "All",
+        }
+
+        selected_mode = st.radio(
+            "모드 선택",
+            options=["all", *MODES],
+            format_func=lambda x: mode_labels.get(x, x.title()),
+            horizontal=True,
+            key="shadowing_mode_selector",
+        )
+
+        speed = st.selectbox(
+            "재생 속도",
+            options=list(TTS_SPEED_OPTIONS.keys()),
+            format_func=lambda x: TTS_SPEED_OPTIONS[x]["label"],
+            index=2,
+            key="shadowing_speed_select_global",
+        )
+
+        if selected_mode == "all":
+            for mode in MODES:
+                st.markdown(f"#### {mode_labels.get(mode, mode.title())}")
+                items = get_mode_state(mode).get("shadowing_items", [])
+                render_mode_shadowing_items(mode, items, speed)
+                st.divider()
+        else:
+            items = get_mode_state(selected_mode).get("shadowing_items", [])
+            render_mode_shadowing_items(selected_mode, items, speed)
+
+        st.divider()
+        st.markdown("#### ✍️ 직접 입력하여 연습")
+
+        custom_text = st.text_area(
+            "인도네시아어 문장 입력",
+            placeholder="Selamat pagi! Apa kabar?",
+            height=100,
+        )
+
+        if custom_text:
+            render_tts_player(custom_text, "", speed, "custom")
+    
+    # ==========================================
+    # 탭 4: 현재 세션 퀴즈 (기존 기능)
+    # ==========================================
+    if active_tab == "quiz":
         st.subheader("📝 현재 세션 퀴즈 풀이")
         
         # 교육적 가치 분석 결과 표시
@@ -4545,9 +4445,9 @@ def render_results_page():
             st.caption(f"💾 로컬 저장: `{fpath}`")
     
     # ==========================================
-    # 서브탭 5: SRS 간격 반복 복습
+    # 탭 5: SRS 간격 반복 복습
     # ==========================================
-    with subtab5:
+    if active_tab == "memory":
         st.subheader("📅 간격 반복 복습 (Spaced Repetition)")
         st.info("💡 틀린 문제가 자동으로 SRS에 등록되어, 최적의 시간에 복습할 수 있습니다.")
         
@@ -4635,6 +4535,15 @@ def render_results_page():
             
             **팁:** 매일 조금씩 복습하면 장기 기억에 더 잘 남습니다!
             """)
+
+    if st.session_state.get("debug_mode_enabled", False):
+        with st.expander("🔍 DEBUG: Mode State Keys"):
+            for mode in MODES:
+                mode_state = get_mode_state(mode)
+                st.write(f"{mode}: {sorted(mode_state.keys())}")
+
+    # ✅ 페이지 하단 중앙 홈 버튼
+    render_home_button_bottom(key="home_from_results_bottom")
 
 def render_settings_page():
     """설정 페이지 렌더링"""
@@ -5005,6 +4914,16 @@ def render_settings_page():
 # =====================================================
 
 current_page = st.session_state.get("current_page", "home")
+header_page = "" if current_page == "home" else current_page
+
+render_header(
+    header_page,
+    navigate_to_page=navigate_to_page,
+    navigate_to_home=navigate_to_home,
+    logo_path=LOGO_PATH,
+    nav_items=NAV_ITEMS,
+    cta_label=UI["cta_make_it_bisa"],
+)
 
 if current_page == "home":
     render_home_page()
@@ -5023,14 +4942,4 @@ else:
     st.session_state["current_page"] = "home"
     st.rerun()
 
-# =====================================================
-# 푸터
-# =====================================================
-
-st.divider()
-st.caption("""
-**🔒 개인정보 보호 및 저작권 준수**
-- YouTube 영상은 임베드 형태로만 제공되며, 자동 다운로드하지 않습니다.
-- 웹 크롤링은 공개된 교육 자료에 한해 제공되며, 저작권을 준수합니다.
-- 생성된 퀴즈 및 코칭 내용은 원본 텍스트를 1:1 복사하지 않고 재작성됩니다.
-""")
+render_footer()
