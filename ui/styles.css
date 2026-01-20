@@ -401,3 +401,23 @@ body[data-theme="dark"],
     padding: 10px 0;
   }
 }
+
+/* === Hide Streamlit default top header bar (removes the white strip above our custom header) === */
+header[data-testid="stHeader"] {
+  display: none;
+}
+
+/* Optional: hide Streamlit toolbar spacing if it still leaves a gap */
+div[data-testid="stToolbar"] {
+  display: none;
+}
+
+.home-hero .hero-media-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.home-hero .hero-media::before { display: none; }
+

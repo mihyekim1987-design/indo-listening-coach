@@ -41,7 +41,10 @@ def render_header(
             unsafe_allow_html=True,
         )
 
-    st.markdown('<div id="header-nav-anchor"></div><div id="app-header">', unsafe_allow_html=True)
+    st.markdown(
+    f'<div id="header-nav-anchor"></div><div id="app-header" data-active-page="{current_page}">',
+    unsafe_allow_html=True,
+)
     logo_col, nav_col, cta_col = st.columns([2, 7, 2])
 
     with logo_col:
@@ -54,7 +57,7 @@ def render_header(
         nav_cols = st.columns(len(nav_items))
         for (page, label), col in zip(nav_items, nav_cols):
             with col:
-                if st.button(label, key=f"nav_{page}", type="secondary", use_container_width=True):
+                if st.button(label, key=f"nav_{page}", type="secondary", width="stretch"):
                     navigate_to_page(page)
 
     with cta_col:

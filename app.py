@@ -31,6 +31,7 @@ import asyncio
 import edge_tts
 import hashlib
 from pathlib import Path
+import base64
 
 from ui.header import inject_global_css, render_header
 from ui.mode_state import MODES, get_mode_state, reset_mode_ephemeral, record_mode_result
@@ -67,7 +68,7 @@ MODEL_ID = "Sparkplugx1904/whisper-base-id"
 TARGET_SR = 16000
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
-LOGO_PATH = Path("Logo.png")
+LOGO_PATH = Path("assets/Logo.png")
 
 # =====================================================
 # UI Labels (single source of truth)
@@ -1852,7 +1853,7 @@ def render_ai_learning_coach(wrong_items: list, score_info: dict, condition: str
     """
     st.markdown("#### 🤖 AI 학습 코치")
     
-    if st.button("💡 맞춤형 학습 조언 받기", type="secondary", use_container_width=True, key=f"{key_prefix}_ai_coach_btn"):
+    if st.button("💡 맞춤형 학습 조언 받기", type="secondary", width="stretch", key=f"{key_prefix}_ai_coach_btn"):
         with st.spinner("AI 코치가 분석 중..."):
             # 취약 카테고리 분석
             categories = {}
@@ -1988,14 +1989,14 @@ def render_repeat_learning_ui(mode: str, key_prefix: str = ""):
         
         col_restart, col_results, col_end = st.columns(3)
         with col_restart:
-            if st.button("🔄 처음부터 다시", key=f"{key_prefix}_repeat_restart", use_container_width=True):
+            if st.button("🔄 처음부터 다시", key=f"{key_prefix}_repeat_restart", width="stretch"):
                 RepeatLearningManager.reset(mode)
                 st.rerun()
         with col_results:
-            if st.button("📊 학습 결과 보기", type="primary", key=f"{key_prefix}_repeat_goto_results", use_container_width=True):
+            if st.button("📊 학습 결과 보기", type="primary", key=f"{key_prefix}_repeat_goto_results", width="stretch"):
                 navigate_to_page("results")
         with col_end:
-            if st.button("🏠 학습 종료", key=f"{key_prefix}_repeat_end", use_container_width=True):
+            if st.button("🏠 학습 종료", key=f"{key_prefix}_repeat_end", width="stretch"):
                 RepeatLearningManager.reset(mode)
                 st.rerun()
         return True
@@ -2049,11 +2050,11 @@ def render_repeat_learning_ui(mode: str, key_prefix: str = ""):
         
         col_submit, col_similar, col_stop = st.columns([2, 1, 1])
         with col_submit:
-            submitted = st.form_submit_button("✅ 제출", type="primary", use_container_width=True)
+            submitted = st.form_submit_button("✅ 제출", type="primary", width="stretch")
         with col_similar:
-            gen_similar = st.form_submit_button("🔄 유사 문제", use_container_width=True)
+            gen_similar = st.form_submit_button("🔄 유사 문제", width="stretch")
         with col_stop:
-            stop_learning = st.form_submit_button("🛑 중단", use_container_width=True)
+            stop_learning = st.form_submit_button("🛑 중단", width="stretch")
     
     # 중단 처리
     if stop_learning:
@@ -2443,7 +2444,7 @@ def render_home_button_bottom(key: str = "home_bottom"):
     st.divider()
     left, center, right = st.columns([1, 2, 1])
     with center:
-        if st.button(UI["btn_home"], key=key, use_container_width=True):
+        if st.button(UI["btn_home"], key=key, width="stretch"):
             navigate_to_home()
 
 def render_footer():
@@ -2477,7 +2478,28 @@ def render_footer():
 # 메인 홈 화면
 # =====================================================
 
+def _img_data_uri(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext == ".png":
+        mime = "image/png"
+    elif ext in (".jpg", ".jpeg"):
+        mime = "image/jpeg"
+    else:
+        # 알 수 없는 확장자는 png로 가정
+        mime = "image/png"
+    data = base64.b64encode(path.read_bytes()).decode("utf-8")
+    return f"data:{mime};base64,{data}"
+
+
 def render_home_page():
+    hero_path = Path("assets/hero.png")
+
+    if hero_path.exists():
+        hero_img = f'<img class="hero-media-img" src="{_img_data_uri(hero_path)}" alt="Learner listening on a laptop" />'
+    else:
+        # 파일이 없을 때 기존 프레임(그라데이션) fallback
+        hero_img = '<div class="hero-media-frame"></div>'
+
     st.markdown(
         f"""
 <div class="home-hero">
@@ -2486,37 +2508,41 @@ def render_home_page():
     <div class="hero-subtext">{UI["home_subtext"]}</div>
     <a class="hero-cta" href="#card-grid">{UI["home_cta_prompt"]}</a>
   </div>
-  <div class="hero-media" role="img" aria-label="Learner listening on a laptop">
-    <div class="hero-media-frame"></div>
+  <div class="hero-media">
+    {hero_img}
   </div>
 </div>
         """,
         unsafe_allow_html=True,
     )
 
+    st.markdown("</div>", unsafe_allow_html=True)
+
     st.markdown('<div id="card-grid"></div>', unsafe_allow_html=True)
+
     st.markdown('<div class="home-card-grid">', unsafe_allow_html=True)
     col1, col2, col3 = st.columns(3, gap="large")
     with col1:
-        if st.button(UI["card_audio"], key="btn_audio", use_container_width=True):
+        if st.button(UI["card_audio"], key="btn_audio", width="stretch"):
             navigate_to_page("audio")
     with col2:
-        if st.button(UI["card_youtube"], key="btn_youtube", use_container_width=True):
+        if st.button(UI["card_youtube"], key="btn_youtube", width="stretch"):
             navigate_to_page("youtube")
     with col3:
-        if st.button(UI["card_text"], key="btn_text", use_container_width=True):
+        if st.button(UI["card_text"], key="btn_text", width="stretch"):
             navigate_to_page("text")
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="home-card-grid">', unsafe_allow_html=True)
     left_spacer, col4, col5, right_spacer = st.columns([1, 2, 2, 1], gap="large")
     with col4:
-        if st.button(UI["card_results"], key="btn_results", use_container_width=True):
+        if st.button(UI["card_results"], key="btn_results", width="stretch"):
             navigate_to_page("results")
     with col5:
-        if st.button(UI["card_settings"], key="btn_settings", use_container_width=True):
+        if st.button(UI["card_settings"], key="btn_settings", width="stretch"):
             navigate_to_page("settings")
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 # =====================================================
 # 페이지 함수들
@@ -2565,7 +2591,7 @@ def render_audio_page():
         st.audio(wav_path, format="audio/wav")
         
         # ASR 실행 버튼
-        if st.button("🎤 음성 → 텍스트 변환", type="primary", key="btn_asr", use_container_width=True):
+        if st.button("🎤 음성 → 텍스트 변환", type="primary", key="btn_asr", width="stretch"):
             asr = load_asr()
             t0 = time.perf_counter()
             
@@ -2606,7 +2632,7 @@ def render_audio_page():
         # 퀴즈 생성 버튼
         st.markdown("---")
         
-        if st.button(f"🎯 퀴즈 {num_questions}문항 생성하기", type="primary", key="btn_generate_audio_quiz_main", use_container_width=True):
+        if st.button(f"🎯 퀴즈 {num_questions}문항 생성하기", type="primary", key="btn_generate_audio_quiz_main", width="stretch"):
             st.session_state["start_audio_quiz_generation"] = True
             st.rerun()
     
@@ -2874,7 +2900,7 @@ def render_audio_page():
                     st.markdown("#### 🔄 반복 학습")
                     st.info(f"💡 틀린 문제 {len(wrong_items)}개를 모두 맞출 때까지 반복 학습할 수 있습니다!")
                     
-                    if st.button("🚀 틀린 문제 반복 학습 시작", type="primary", use_container_width=True, key="audio_start_repeat"):
+                    if st.button("🚀 틀린 문제 반복 학습 시작", type="primary", width="stretch", key="audio_start_repeat"):
                         # 취약점 분석 추가
                         analyzed_wrong = []
                         for item in wrong_items:
@@ -2898,14 +2924,14 @@ def render_audio_page():
                 
                 # 학습 결과 페이지로 이동 버튼
                 st.divider()
-                if st.button(UI["btn_view_progress"], type="primary", use_container_width=True, key="audio_goto_results"):
+                if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="audio_goto_results"):
                     navigate_to_page("results")
             else:
                 st.divider()
                 st.success("🎉 모든 문제를 맞혔습니다! 완벽해요!")
                 
                 # 학습 결과 페이지로 이동 버튼
-                if st.button(UI["btn_view_progress"], type="primary", use_container_width=True, key="audio_goto_results_perfect"):
+                if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="audio_goto_results_perfect"):
                     navigate_to_page("results")
 
     # ✅ 페이지 하단 중앙 홈 버튼
@@ -3022,7 +3048,7 @@ def render_youtube_page():
             col_sub1, col_sub2 = st.columns([2, 1])
             
             with col_sub1:
-                fetch_clicked = st.button("🎬 자막 가져오기", key=f"fetch_subtitle_{video_id}", use_container_width=True)
+                fetch_clicked = st.button("🎬 자막 가져오기", key=f"fetch_subtitle_{video_id}", width="stretch")
             
             with col_sub2:
                 reset_subtitle_clicked = st.button("🔄 자막 초기화", key=f"reset_subtitle_{video_id}")
@@ -3146,7 +3172,7 @@ Topik utama adalah...""",
                 else:
                     btn_label = f"🎯 가져온 자막으로 퀴즈 {num_questions}문항 생성"
                 
-                if st.button(btn_label, type="primary", key=quiz_btn_key, use_container_width=True):
+                if st.button(btn_label, type="primary", key=quiz_btn_key, width="stretch"):
                     # session_state에 플래그 및 현재 URL 정보 저장
                     st.session_state["start_quiz_generation"] = True
                     st.session_state["youtube_transcript"] = text_for_quiz
@@ -3159,7 +3185,7 @@ Topik utama adalah...""",
                     st.rerun()
             else:
                 quiz_btn_disabled_key = f"btn_generate_youtube_quiz_disabled_{video_id}"
-                st.button(f"🎯 퀴즈 {num_questions}문항 생성하기", type="primary", key=quiz_btn_disabled_key, use_container_width=True, disabled=True)
+                st.button(f"🎯 퀴즈 {num_questions}문항 생성하기", type="primary", key=quiz_btn_disabled_key, width="stretch", disabled=True)
                 if fetched_subtitle:
                     st.caption("💡 자막을 가져왔으므로 바로 퀴즈를 생성할 수 있습니다. 또는 요약을 작성하세요.")
                 else:
@@ -3465,7 +3491,7 @@ Topik utama adalah...""",
                     st.markdown("#### 🔄 반복 학습")
                     st.info(f"💡 틀린 문제 {len(wrong_items)}개를 모두 맞출 때까지 반복 학습할 수 있습니다!")
                     
-                    if st.button("🚀 틀린 문제 반복 학습 시작", type="primary", use_container_width=True, key="youtube_start_repeat"):
+                    if st.button("🚀 틀린 문제 반복 학습 시작", type="primary", width="stretch", key="youtube_start_repeat"):
                         # 취약점 분석 추가
                         analyzed_wrong = []
                         for item in wrong_items:
@@ -3489,14 +3515,14 @@ Topik utama adalah...""",
                 
                 # 학습 결과 페이지로 이동 버튼
                 st.divider()
-                if st.button(UI["btn_view_progress"], type="primary", use_container_width=True, key="youtube_goto_results"):
+                if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="youtube_goto_results"):
                     navigate_to_page("results")
             else:
                 st.divider()
                 st.success("🎉 모든 문제를 맞혔습니다! 완벽해요!")
                 
                 # 학습 결과 페이지로 이동 버튼
-                if st.button(UI["btn_view_progress"], type="primary", use_container_width=True, key="youtube_goto_results_perfect"):
+                if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="youtube_goto_results_perfect"):
                     navigate_to_page("results")
     else:
         st.info("""
@@ -3541,7 +3567,7 @@ def render_text_page():
     
     with col_url2:
         st.markdown("&nbsp;")  # 공백
-        extract_btn = st.button("🔍 추출", key="btn_extract_text", type="primary", use_container_width=True)
+        extract_btn = st.button("🔍 추출", key="btn_extract_text", type="primary", width="stretch")
     
     # URL 입력 안내
     if text_url and not extract_btn:
@@ -3602,7 +3628,7 @@ def render_text_page():
         # 퀴즈 생성 버튼
         st.markdown("---")
         
-        if st.button(f"🎯 퀴즈 {num_questions}문항 생성하기", type="primary", key="btn_generate_text_quiz_main", use_container_width=True):
+        if st.button(f"🎯 퀴즈 {num_questions}문항 생성하기", type="primary", key="btn_generate_text_quiz_main", width="stretch"):
             st.session_state["start_text_quiz_generation"] = True
             st.rerun()
     else:
@@ -3875,7 +3901,7 @@ def render_text_page():
                     st.markdown("#### 🔄 반복 학습")
                     st.info(f"💡 틀린 문제 {len(wrong_items)}개를 모두 맞출 때까지 반복 학습할 수 있습니다!")
                     
-                    if st.button("🚀 틀린 문제 반복 학습 시작", type="primary", use_container_width=True, key="text_start_repeat"):
+                    if st.button("🚀 틀린 문제 반복 학습 시작", type="primary", width="stretch", key="text_start_repeat"):
                         # 취약점 분석 추가
                         analyzed_wrong = []
                         for item in wrong_items:
@@ -3899,14 +3925,14 @@ def render_text_page():
                 
                 # 학습 결과 페이지로 이동 버튼
                 st.divider()
-                if st.button(UI["btn_view_progress"], type="primary", use_container_width=True, key="text_goto_results"):
+                if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="text_goto_results"):
                     navigate_to_page("results")
             else:
                 st.divider()
                 st.success("🎉 모든 문제를 맞혔습니다! 완벽해요!")
                 
                 # 학습 결과 페이지로 이동 버튼
-                if st.button(UI["btn_view_progress"], type="primary", use_container_width=True, key="text_goto_results_perfect"):
+                if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="text_goto_results_perfect"):
                     navigate_to_page("results")
 
 
@@ -3939,7 +3965,7 @@ def render_results_page():
                 label,
                 key=f"progress_tab_{tab_key}",
                 type="primary" if active_tab == tab_key else "secondary",
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state["progress_tab"] = tab_key
                 st.rerun()
@@ -4157,7 +4183,7 @@ def render_results_page():
             if st.button(
                 "🚀 반복 학습 시작!",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
                 key=f"review_start_repeat_{mode}",
             ):
                 RepeatLearningManager.start_repeat_learning(mode, wrong_items, quiz_questions)
@@ -4618,7 +4644,7 @@ def render_settings_page():
             col_btn1, col_btn2 = st.columns(2)
             
             with col_btn1:
-                if st.button("🗑️ 모든 임시 오디오 삭제", type="secondary", use_container_width=True):
+                if st.button("🗑️ 모든 임시 오디오 삭제", type="secondary", width="stretch"):
                     deleted_count = 0
                     deleted_size = 0
                     
@@ -4644,7 +4670,7 @@ def render_settings_page():
                 
                 if st.button(f"🗑️ 7일 이전 파일 삭제 ({len(old_wav)}개)", 
                              type="secondary", 
-                             use_container_width=True,
+                             width="stretch",
                              disabled=len(old_wav)==0):
                     deleted_count = 0
                     deleted_size = 0
@@ -4711,7 +4737,7 @@ def render_settings_page():
                 
                 if st.button(f"🗑️ 30일 이전 로그 삭제 ({len(old_logs_30)}개)", 
                              type="secondary", 
-                             use_container_width=True,
+                             width="stretch",
                              disabled=len(old_logs_30)==0):
                     deleted_count = 0
                     
@@ -4733,7 +4759,7 @@ def render_settings_page():
                 
                 if st.button(f"🗑️ 7일 이전 로그 삭제 ({len(old_logs_7)}개)", 
                              type="secondary", 
-                             use_container_width=True,
+                             width="stretch",
                              disabled=len(old_logs_7)==0):
                     deleted_count = 0
                     
@@ -4788,7 +4814,7 @@ def render_settings_page():
                                 file_name=os.path.basename(file),
                                 mime="application/json",
                                 key=f"download_result_{i}",
-                                use_container_width=True
+                                width="stretch"
                             )
                         except:
                             pass
@@ -4807,7 +4833,7 @@ def render_settings_page():
             
             with col_btn1:
                 # 모든 결과 파일 백업 (ZIP)
-                if st.button("📦 모든 결과 백업 (ZIP)", type="primary", use_container_width=True):
+                if st.button("📦 모든 결과 백업 (ZIP)", type="primary", width="stretch"):
                     import zipfile
                     
                     backup_name = f"backup_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
@@ -4828,7 +4854,7 @@ def render_settings_page():
                                 file_name=backup_name,
                                 mime="application/zip",
                                 key="download_backup",
-                                use_container_width=True
+                                width="stretch"
                             )
                     except Exception as e:
                         st.error(f"백업 실패: {e}")
@@ -4840,7 +4866,7 @@ def render_settings_page():
                 
                 if st.button(f"🗑️ 30일 이전 결과 삭제 ({len(old_results)}개)", 
                              type="secondary", 
-                             use_container_width=True,
+                             width="stretch",
                              disabled=len(old_results)==0):
                     deleted_count = 0
                     
