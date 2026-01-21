@@ -46,7 +46,7 @@ body[data-theme="dark"],
   max-width: 1400px;
   padding-left: 80px;
   padding-right: 80px;
-  padding-top: 32px;
+  padding-top: 0px;
   padding-bottom: 48px;
 }
 
@@ -64,8 +64,8 @@ body[data-theme="dark"],
   top: 0;
   z-index: 1000;
   background: var(--header-bg);
-  border-bottom: 1px solid var(--surface-card-border);
-  box-shadow: var(--header-shadow);
+  border-bottom: 0 !important;
+  box-shadow: none !important;
   padding: 14px 0;
 }
 
@@ -402,22 +402,24 @@ body[data-theme="dark"],
   }
 }
 
-/* === Hide Streamlit default top header bar (removes the white strip above our custom header) === */
-header[data-testid="stHeader"] {
-  display: none;
+/* =====================================================
+   Streamlit top chrome hide (1.53.x)
+   - removes white strip above custom header
+   ===================================================== */
+header[data-testid="stHeader"],
+div[data-testid="stToolbar"],
+div[data-testid="stDecoration"],
+div[data-testid="stStatusWidget"] {
+  display: none !important;
+  height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
 }
 
-/* Optional: hide Streamlit toolbar spacing if it still leaves a gap */
-div[data-testid="stToolbar"] {
-  display: none;
-}
 
-.home-hero .hero-media-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
 
-.home-hero .hero-media::before { display: none; }
+
 
