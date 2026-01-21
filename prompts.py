@@ -142,6 +142,7 @@ COACH_PROMPT = """역할: 당신은 인도네시아어 초급(A1~A2) 학습 코�
       "is_correct": true,
       "correct_explain_ko": "왜 정답이 맞는지 설명",
       "wrong_reason_ko": "오답인 경우 왜 틀렸는지 설명 (정답이면 빈 문자열)",
+      "summary_ko": "이 문항 결론/요약 (1~2문장)",
       "choice_notes_ko": {{"A":"A 설명","B":"B 설명","C":"C 설명","D":"D 설명"}},
       "evidence_quote": "TRANSCRIPT에서 근거 인용(인도네시아어)"
     }}

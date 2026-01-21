@@ -928,6 +928,7 @@ class ExplainItem(BaseModel):
     is_correct: bool
     correct_explain_ko: str
     wrong_reason_ko: str
+    summary_ko: str = ""
     choice_notes_ko: ChoiceNotes
     evidence_quote: str
 
@@ -1790,19 +1791,11 @@ def render_tts_player_edgetts(
     edge-tts를 사용한 TTS 재생 플레이어 렌더링
     - 실패 시 예외를 raise하지 않고 None 처리(상위에서 제어)
     """
-    st.markdown(f"""
-    <div style="background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-                padding: 1rem; border-radius: 12px; margin: 0.5rem 0;
-                border-left: 4px solid #667eea;">
-        <p style="font-size: 1.1rem; color: #1e3c72; margin-bottom: 0.5rem; font-weight: 500;">
-            🇮🇩 {text}
-        </p>
-        {f'<p style="color: #666; font-size: 0.9rem; margin: 0;">🇰🇷 {translation}</p>' if translation else ''}
-        <p style="color:#888; font-size:0.8rem; margin:0.4rem 0 0 0;">
-            TTS Voice: {voice} / Speed: {speed}
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+    speed_label = TTS_SPEED_OPTIONS.get(speed, {}).get("label", speed)
+    st.markdown(f"🇮🇩 {text}")
+    if translation:
+        st.markdown(f"🇰🇷 {translation}")
+    st.caption(f"TTS Voice: {voice} / Speed: {speed_label}")
 
     with st.spinner("🎤 음성 생성 중..."):
         audio_file = get_tts_audio_path(text, speed=speed, voice=voice)
@@ -2034,6 +2027,22 @@ def render_repeat_learning_ui(mode: str, key_prefix: str = ""):
         return False
     
     st.markdown(f"**{question_text}**")
+
+    shadowing_answer = st.session_state.get(f"{key_prefix}_repeat_answer_{q_id}", "")
+    shadowing_payload = build_shadowing_payload(mode, current_q, current_q, shadowing_answer or "")
+    if st.button(
+        "🗣️ 섀도잉 연습하기",
+        width="stretch",
+        key=f"{key_prefix}_repeat_shadowing_{q_id}_{progress['total_retries']}",
+    ):
+        st.session_state["shadowing_return_to"] = "results"
+        st.session_state["repeat_learning_resume"] = {
+            "mode": mode,
+            "q_id": str(q_id),
+            "total_retries": progress.get("total_retries", 0),
+        }
+        st.session_state["force_review_tab"] = True
+        set_shadowing_payload_and_go(shadowing_payload, navigate_to_page)
     
     # 선택지
     choices = current_q.get("choices", {})
@@ -2084,6 +2093,7 @@ def render_repeat_learning_ui(mode: str, key_prefix: str = ""):
                 evidence = current_q.get("evidence_quote", "")
                 if evidence:
                     st.markdown(f"📄 **근거:** _{evidence}_")
+
     
     # 유사 문제 생성
     if gen_similar:
@@ -2286,6 +2296,13 @@ def sanitize_coach_structured(coach: dict, quiz: dict, user_answers: dict):
         # evidence_quote가 없으면 quiz에서 가져오기
         if not item.get("evidence_quote"):
             item["evidence_quote"] = evidence_from_quiz
+
+        # summary_ko 보완
+        if not item.get("summary_ko"):
+            correct_explain = item.get("correct_explain_ko", "")
+            correct_ans = quiz_dict.get(qid, {}).get("answer", "")
+            evidence = item.get("evidence_quote", "")
+            item["summary_ko"] = _build_item_summary(correct_explain, evidence, correct_ans)
         
         # choice_notes_ko 검증 (Pydantic이 보장하므로 항상 존재해야 함)
         choice_notes = item.get("choice_notes_ko", {})
@@ -2329,6 +2346,217 @@ def sanitize_coach_structured(coach: dict, quiz: dict, user_answers: dict):
     return coach
 
 
+def _first_sentence(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = " ".join(text.strip().split())
+    for sep in (". ", "? ", "! ", "。"):
+        if sep in cleaned:
+            return cleaned.split(sep)[0].strip() + sep.strip()
+    return cleaned
+
+
+def _build_item_summary(correct_explain: str, evidence: str, correct_answer: str) -> str:
+    if correct_explain:
+        return _first_sentence(correct_explain)
+    if evidence and correct_answer:
+        return f"정답은 {correct_answer}입니다. 근거 문장을 확인하세요."
+    if correct_answer:
+        return f"정답은 {correct_answer}입니다."
+    return "정답 근거를 다시 확인해보세요."
+
+
+def _normalize_choice_notes(choice_notes: dict) -> dict:
+    if not isinstance(choice_notes, dict):
+        choice_notes = {}
+    return {
+        "A": choice_notes.get("A", "지문/근거와 일치하지 않음"),
+        "B": choice_notes.get("B", "지문/근거와 일치하지 않음"),
+        "C": choice_notes.get("C", "지문/근거와 일치하지 않음"),
+        "D": choice_notes.get("D", "지문/근거와 일치하지 않음"),
+    }
+
+
+def attach_explanations_to_quiz(quiz: dict, coach: dict, user_answers: dict) -> dict:
+    if not quiz:
+        return quiz
+
+    items_by_id = {str(item.get("id")): item for item in coach.get("items", [])}
+    for q in quiz.get("questions", []):
+        qid = str(q.get("id"))
+        item = items_by_id.get(qid, {})
+        evidence = item.get("evidence_quote") or q.get("evidence_quote", "")
+        correct_ans = q.get("answer", "")
+        correct_explain = item.get("correct_explain_ko", "")
+        summary = item.get("summary_ko") or _build_item_summary(correct_explain, evidence, correct_ans)
+        choices_exp = _normalize_choice_notes(item.get("choice_notes_ko", {}))
+
+        q["explanation"] = {
+            "correct": correct_explain or _build_item_summary("", evidence, correct_ans),
+            "options": choices_exp,
+            "summary": summary,
+        }
+    return quiz
+
+
+def pick_shadowing_target(question: dict, item: dict) -> str:
+    evidence = (item.get("evidence_quote") or question.get("evidence_quote") or "").strip()
+    if evidence:
+        return evidence
+
+    correct_key = question.get("answer", "")
+    correct_choice = (question.get("choices", {}) or {}).get(correct_key, "")
+    if correct_choice:
+        return correct_choice
+
+    snippet = (
+        question.get("transcript_snippet")
+        or question.get("source_text")
+        or question.get("transcript")
+        or question.get("question")
+        or ""
+    )
+    return _first_sentence(snippet)
+
+
+def build_shadowing_payload(mode: str, question: dict, item: dict, user_answer: str) -> dict:
+    source = "youtube" if mode == "video" else mode
+    correct_answer = question.get("answer", "")
+    rationale = (
+        item.get("correct_explain_ko")
+        or item.get("why_correct_ko")
+        or item.get("summary_ko")
+        or ""
+    )
+    evidence = item.get("evidence_quote") or question.get("evidence_quote")
+    audio_ref = question.get("audio_ref") or question.get("audio_url") or None
+
+    return {
+        "source": source,
+        "target_text": pick_shadowing_target(question, item),
+        "question": question.get("question", ""),
+        "correct_answer": correct_answer,
+        "user_answer": user_answer,
+        "rationale": rationale,
+        "evidence_quote": evidence,
+        "audio_ref": audio_ref,
+    }
+
+
+def build_repeat_entry_shadowing_payload(mode: str, wrong_items: list, quiz_questions: list):
+    if not wrong_items:
+        return None, ""
+    first_item = wrong_items[0]
+    q_id = str(first_item.get("id", ""))
+    question = next((q for q in quiz_questions if str(q.get("id")) == q_id), {})
+    target_question = question if question else first_item
+    payload = build_shadowing_payload(
+        mode,
+        target_question,
+        first_item,
+        first_item.get("user_answer", ""),
+    )
+    return payload, str(target_question.get("id", first_item.get("id", "")))
+
+
+def set_shadowing_payload_and_go(payload: dict, navigate_to_page_fn) -> None:
+    st.session_state["shadowing_payload"] = payload
+    navigate_to_page_fn("speaking")
+    st.rerun()
+
+
+def render_quiz_takeaways(coach: dict, wrong_items: list) -> None:
+    items = coach.get("items", [])
+    correct_notes = [i.get("correct_explain_ko", "") for i in items if i.get("correct_explain_ko")]
+    wrong_notes = [
+        i.get("wrong_reason_ko", "")
+        for i in items
+        if not i.get("is_correct", True) and i.get("wrong_reason_ko")
+    ]
+    core_point = _first_sentence(correct_notes[0]) if correct_notes else "정답 근거를 원문에서 다시 확인해보세요."
+    confusion_point = (
+        _first_sentence(wrong_notes[0]) if wrong_notes else "이번 회차에서는 큰 혼동 포인트가 없었습니다."
+    )
+    if wrong_items:
+        next_action = f"오답 {len(wrong_items)}문항은 섀도잉으로 복습해보세요."
+    else:
+        next_action = "정답률이 높습니다. 다음에는 난이도를 한 단계 올려보세요."
+
+    st.markdown("#### 🧾 이번 퀴즈 결론/요약")
+    st.markdown(f"- **핵심 포인트:** {core_point}")
+    st.markdown(f"- **자주 헷갈린 포인트:** {confusion_point}")
+    st.markdown(f"- **다음 행동:** {next_action}")
+
+
+def render_question_result(
+    mode: str,
+    question: dict,
+    item: dict,
+    user_answer: str,
+    wrong_item: dict,
+    key_prefix: str,
+    navigate_to_page_fn,
+) -> None:
+    qid = str(question.get("id"))
+    question_text = question.get("question", "")
+    is_correct = item.get("is_correct") if item else (user_answer == question.get("answer", ""))
+    status_emoji = "✅" if is_correct else "❌"
+
+    expander_label = f"Q{qid}. {question_text} {status_emoji}"
+    with st.expander(expander_label, expanded=not is_correct):
+        correct_answer = question.get("answer", "")
+        choices = question.get("choices", {}) or {}
+        explanation = question.get("explanation", {})
+        evidence = item.get("evidence_quote") or question.get("evidence_quote", "")
+
+        st.markdown(f"**정답:** {correct_answer} | **내 답:** {user_answer or '미선택'}")
+
+        if is_correct:
+            correct_explain = explanation.get("correct") or item.get("correct_explain_ko", "")
+            if correct_explain:
+                st.markdown(f"✅ **왜 맞는가:** {correct_explain}")
+
+            st.markdown("**선택지:**")
+            for opt in ["A", "B", "C", "D"]:
+                choice_text = choices.get(opt, "")
+                label = f"{opt}. {choice_text}"
+                if opt == correct_answer:
+                    label = f"**{label}** ✅"
+                st.markdown(f"- {label}")
+        else:
+            wrong_reason = item.get("wrong_reason_ko", "")
+            if not wrong_reason and explanation.get("options"):
+                wrong_reason = explanation.get("options", {}).get(user_answer, "")
+            if wrong_reason:
+                st.markdown(f"❌ **내 답이 왜 틀렸는가:** {wrong_reason}")
+
+            correct_explain = explanation.get("correct") or item.get("correct_explain_ko", "")
+            if correct_explain:
+                st.markdown(f"✅ **정답이 왜 맞는가:** {correct_explain}")
+
+            options_exp = explanation.get("options", {})
+            if options_exp:
+                st.markdown("**📋 선택지별 설명:**")
+                for opt in ["A", "B", "C", "D"]:
+                    choice_text = choices.get(opt, "")
+                    exp = options_exp.get(opt, "")
+                    label = f"{opt}. {choice_text}"
+                    if opt == correct_answer:
+                        label = f"**{label}** ✅"
+                    if opt == user_answer and opt != correct_answer:
+                        label = f"**{label}** ❌ 내 선택"
+                    st.markdown(f"- {label} — {exp}")
+        if evidence:
+            st.caption(f"근거: \"{evidence}\"")
+
+        summary = explanation.get("summary")
+        if summary:
+            st.caption(f"이 문항 요약: {summary}")
+
+        if not is_correct:
+            st.caption("💡 반복 학습에서 섀도잉 연습을 진행할 수 있습니다.")
+
+
 # =====================================================
 # 5. Streamlit UI
 # =====================================================
@@ -2339,75 +2567,171 @@ inject_global_css(Path("ui/styles.css"))
 
 
 # =====================================================
-# 사이드바 설정
+# 학습 설정 및 상태 초기화
 # =====================================================
 if "debug_mode_enabled" not in st.session_state:
     st.session_state["debug_mode_enabled"] = False
+if "gen_model" not in st.session_state:
+    st.session_state["gen_model"] = "gpt-4o-mini"
+if "today_condition" not in st.session_state:
+    st.session_state["today_condition"] = None
+if "today_condition_note" not in st.session_state:
+    st.session_state["today_condition_note"] = ""
+if "learning_mode" not in st.session_state:
+    st.session_state["learning_mode"] = None
 
-with st.sidebar:
-    # 이하 학습 설정/모델 설정 코드 계속...
+CONDITION_TO_QUESTIONS = {"A": 10, "B": 5, "C": 3}
+CONDITION_LABELS = {"A": "A (여유)", "B": "B (보통)", "C": "C (힘듦)"}
+MODE_TO_LEVEL = {
+    "BIPA (초급)": "초급 (A1~A2)",
+    "BIPA (중급)": "중급 (B1~B2)",
+}
+DEFAULT_NUM_QUESTIONS = 5
+DEFAULT_LEVEL = "초급 (A1~A2)"
+LEGACY_CONDITION_TO_CODE = {label: code for code, label in CONDITION_LABELS.items()}
 
-    
-    # 학습 설정
-    st.subheader("📚 학습 설정")
-    
-    condition = st.selectbox(
-        "오늘 컨디션", 
-        ["A (여유)", "B (보통)", "C (힘듦)"], 
-        index=None,  # 기본 선택 없음
-        placeholder="컨디션을 선택하세요",
-        help="컨디션에 따라 문제 수가 달라집니다 (A: 10문제, B: 5문제, C: 3문제)"
-    )
-    
-    # 컨디션에 따른 문제 수 매핑
-    if condition:
-        condition_to_questions = {
-            "A": 10,
-            "B": 5,
-            "C": 3
-        }
-        condition_simple = condition.split()[0]
-        num_questions = condition_to_questions.get(condition_simple, 5)
-        st.caption(f"💡 현재 설정: **{num_questions}문제** 생성")
+if st.session_state.get("today_condition") in LEGACY_CONDITION_TO_CODE:
+    st.session_state["today_condition"] = LEGACY_CONDITION_TO_CODE[
+        st.session_state.get("today_condition")
+    ]
+
+
+def get_learning_settings_state() -> dict:
+    condition_code = st.session_state.get("today_condition")
+    learning_mode = st.session_state.get("learning_mode")
+    effective_condition = condition_code or "B"
+    num_questions = CONDITION_TO_QUESTIONS.get(effective_condition, DEFAULT_NUM_QUESTIONS)
+    if learning_mode:
+        level = MODE_TO_LEVEL.get(learning_mode, DEFAULT_LEVEL)
     else:
-        num_questions = 5  # 기본값
-        st.caption("⚠️ 컨디션을 선택하지 않았습니다 (기본: 5문제)")
-    
-    mode = st.selectbox(
-        "학습 모드", 
-        ["BIPA (초급)", "BIPA (중급)"], 
-        index=None,  # 기본 선택 없음
-        placeholder="학습 모드를 선택하세요"
-    )
-    
-    # 학습 모드에 따른 레벨 매핑
-    if mode:
-        mode_to_level = {
-            "BIPA (초급)": "초급 (A1~A2)",
-            "BIPA (중급)": "중급 (B1~B2)"
-        }
-        level = mode_to_level.get(mode, "초급 (A1~A2)")
-    else:
-        level = "초급 (A1~A2)"  # 기본값
-        st.caption("⚠️ 학습 모드를 선택하지 않았습니다 (기본: 초급)")
-    
-    st.divider()
-    
-    # 모델 설정
-    st.subheader("🤖 모델 설정")
-    gen_model = st.text_input("생성 모델", value="gpt-4o-mini")
-    # 세션 상태에 저장하여 다른 곳에서도 사용 가능하도록
-    st.session_state["gen_model"] = gen_model
-    
-    # 디버그 모드 표시 (활성화된 경우)
-    if st.session_state.get("debug_mode_enabled", False):
-        st.success("🔍 DEBUG 모드 활성화됨")
-        if st.button("❌ 디버그 모드 비활성화", key="disable_debug"):
-            st.session_state["debug_mode_enabled"] = False
+        level = DEFAULT_LEVEL
+    return {
+        "condition": condition_code,
+        "learning_mode": learning_mode,
+        "num_questions": num_questions,
+        "level": level,
+        "condition_simple": effective_condition,
+    }
+
+
+def render_learning_top_controls(mode: str, navigate_to_page_fn, key_prefix: str):
+    settings = get_learning_settings_state()
+    condition = settings["condition"]
+    learning_mode = settings["learning_mode"]
+    num_questions = settings["num_questions"]
+    level = settings["level"]
+
+    def render_condition_controls():
+        tmp_cond = f"{key_prefix}_tmp_today_condition"
+        tmp_note = f"{key_prefix}_tmp_today_condition_note"
+        if tmp_cond not in st.session_state:
+            st.session_state[tmp_cond] = st.session_state.get("today_condition")
+        if tmp_note not in st.session_state:
+            st.session_state[tmp_note] = st.session_state.get("today_condition_note", "")
+        st.selectbox(
+            "오늘 컨디션",
+            ["A", "B", "C"],
+            index=None,
+            placeholder="컨디션을 선택하세요",
+            help="컨디션에 따라 문제 수가 달라집니다 (A: 10문제, B: 5문제, C: 3문제)",
+            format_func=lambda k: CONDITION_LABELS.get(k, k),
+            key=tmp_cond,
+        )
+        st.text_area("메모 (선택)", key=tmp_note, height=80)
+        current_condition = st.session_state.get(tmp_cond)
+        if current_condition:
+            current_questions = CONDITION_TO_QUESTIONS.get(current_condition, DEFAULT_NUM_QUESTIONS)
+            st.caption(f"💡 현재 설정: **{current_questions}문제** 생성")
+        else:
+            st.caption("⚠️ 컨디션을 선택하지 않았습니다 (기본: 5문제)")
+
+    def render_condition_actions():
+        tmp_cond = f"{key_prefix}_tmp_today_condition"
+        tmp_note = f"{key_prefix}_tmp_today_condition_note"
+        if st.button("✅ 적용", type="primary", width="stretch", key=f"{key_prefix}_cond_apply"):
+            st.session_state["today_condition"] = st.session_state.get(tmp_cond)
+            st.session_state["today_condition_note"] = st.session_state.get(tmp_note, "")
+            st.session_state.pop(tmp_cond, None)
+            st.session_state.pop(tmp_note, None)
             st.rerun()
+
+    def render_settings_controls():
+        tmp_mode = f"{key_prefix}_tmp_learning_mode"
+        if tmp_mode not in st.session_state:
+            st.session_state[tmp_mode] = st.session_state.get("learning_mode")
+        st.selectbox(
+            "학습 모드",
+            ["BIPA (초급)", "BIPA (중급)"],
+            index=None,
+            placeholder="학습 모드를 선택하세요",
+            key=tmp_mode,
+        )
+        current_mode = st.session_state.get(tmp_mode)
+        if current_mode:
+            current_level = MODE_TO_LEVEL.get(current_mode, DEFAULT_LEVEL)
+            st.caption(f"📘 현재 레벨: **{current_level}**")
+        else:
+            st.caption("⚠️ 학습 모드를 선택하지 않았습니다 (기본: 초급)")
+
+    def render_settings_actions():
+        tmp_mode = f"{key_prefix}_tmp_learning_mode"
+        if st.button("✅ 적용", type="primary", width="stretch", key=f"{key_prefix}_mode_apply"):
+            st.session_state["learning_mode"] = st.session_state.get(tmp_mode)
+            st.session_state.pop(tmp_mode, None)
+            st.rerun()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        condition_clicked = st.button("🌤 오늘의 컨디션", width="stretch", key=f"{key_prefix}_condition_btn")
+    with col2:
+        settings_clicked = st.button("⚙️ 학습 설정", width="stretch", key=f"{key_prefix}_settings_btn")
+
+    if hasattr(st, "dialog"):
+        @st.dialog("🌤 오늘의 컨디션")
+        def condition_dialog():
+            render_condition_controls()
+            render_condition_actions()
+
+        @st.dialog("⚙️ 학습 설정")
+        def settings_dialog():
+            render_settings_controls()
+            render_settings_actions()
+
+        if condition_clicked:
+            condition_dialog()
+        if settings_clicked:
+            settings_dialog()
+    else:
+        show_condition = st.session_state.get(f"{key_prefix}_show_condition", False)
+        show_settings = st.session_state.get(f"{key_prefix}_show_settings", False)
+        if condition_clicked:
+            show_condition = True
+            st.session_state[f"{key_prefix}_show_condition"] = True
+        if settings_clicked:
+            show_settings = True
+            st.session_state[f"{key_prefix}_show_settings"] = True
+        with st.expander("🌤 오늘의 컨디션", expanded=show_condition):
+            render_condition_controls()
+            render_condition_actions()
+        with st.expander("⚙️ 학습 설정", expanded=show_settings):
+            render_settings_controls()
+            render_settings_actions()
+
+    if condition or learning_mode:
+        status_bits = []
+        if condition:
+            status_bits.append(f"오늘의 컨디션: {CONDITION_LABELS.get(condition, condition)}")
+        if learning_mode:
+            status_bits.append(f"설정: {learning_mode} · {num_questions}문제 · {level}")
+        st.caption(" | ".join(status_bits))
 
 # 디버그 모드 변수 (전역에서 사용 가능하도록)
 debug = st.session_state.get("debug_mode_enabled", False)
+gen_model = st.session_state.get("gen_model", "gpt-4o-mini")
+_learning_settings = get_learning_settings_state()
+condition = _learning_settings["condition"]
+num_questions = _learning_settings["num_questions"]
+level = _learning_settings["level"]
 
 # =====================================================
 # 페이지 네비게이션 시스템
@@ -2553,6 +2877,8 @@ def render_audio_page():
     
     st.header("🎵 오디오로 학습하기")
     st.markdown("WAV 파일을 업로드하면 음성을 텍스트로 변환하고 퀴즈를 생성합니다.")
+
+    render_learning_top_controls("audio", navigate_to_page, key_prefix="audio_top")
     
     # 1단계: 오디오 선택
     st.subheader("1️⃣ 오디오 선택")
@@ -2715,7 +3041,9 @@ def render_audio_page():
                         st.error(f"⚠️ 모든 문제에 답을 선택해주세요! (미선택 문제: {', '.join(['Q' + qid for qid in empty_answers])})")
                     else:
                         try:
-                            condition_simple = condition.split()[0] if condition else "B"
+                            condition_simple = condition or "B"
+
+                            st.session_state["audio_user_answers"] = user_answers
                             
                             prompt = safe_prompt_fill(
                                 COACH_PROMPT,
@@ -2729,6 +3057,9 @@ def render_audio_page():
                                 # Structured Outputs 사용
                                 coach = llm_structured(prompt, CoachResponse, model=gen_model)
                                 coach = sanitize_coach_structured(coach, audio_quiz, user_answers)
+
+                            audio_quiz = attach_explanations_to_quiz(audio_quiz, coach, user_answers)
+                            st.session_state["audio_quiz"] = audio_quiz
                             
                             st.session_state["audio_coach"] = coach
                             
@@ -2792,7 +3123,7 @@ def render_audio_page():
             col1, col2, col3 = st.columns(3)
             col1.metric("정답 수", f"{correct}/{total}")
             col2.metric("정답률", f"{percent}%")
-            col3.metric("컨디션", condition.split()[0] if condition else "미설정")
+            col3.metric("컨디션", condition or "미설정")
             
             # 오답 풀이 및 해설
             st.divider()
@@ -2801,66 +3132,27 @@ def render_audio_page():
             audio_quiz = st.session_state.get("audio_quiz", {})
             questions = audio_quiz.get("questions", [])
             wrong_items = audio_coach.get("wrong_items", [])
-            wrong_ids = [str(wi.get("id")) for wi in wrong_items]
-            
+            wrong_items_by_id = {str(item.get("id")): item for item in wrong_items}
+            items_by_id = {str(item.get("id")): item for item in audio_coach.get("items", [])}
+            user_answers = st.session_state.get("audio_user_answers", {})
+
             for q in questions:
                 qid = str(q.get("id"))
-                is_wrong = qid in wrong_ids
-                
-                # 정답/오답 표시
-                if is_wrong:
-                    st.markdown(f"**Q{qid}. {q.get('question', '')}** ❌")
-                else:
-                    st.markdown(f"**Q{qid}. {q.get('question', '')}** ✅")
-                
-                choices = q.get("choices", {})
-                correct_ans = q.get("answer", "")
-                
-                # 오답인 경우 상세 해설 표시
-                if is_wrong:
-                    wrong_item = next((wi for wi in wrong_items if str(wi.get("id")) == qid), None)
-                    if wrong_item:
-                        user_ans = wrong_item.get("user_answer", "")
-                        
-                        # 내 답 vs 정답
-                        st.warning(f"**내 답:** {user_ans} | **정답:** {correct_ans}")
-                        
-                        # 정답이 정답인 이유
-                        why_correct = wrong_item.get("why_correct_ko", "")
-                        if why_correct:
-                            st.success(f"✅ **정답 해설:** {why_correct}")
-                        
-                        # 내 답이 틀린 이유
-                        why_user_wrong = wrong_item.get("why_user_wrong_ko", "")
-                        if why_user_wrong:
-                            st.error(f"❌ **오답 이유:** {why_user_wrong}")
-                        
-                        # 근거 인용
-                        evidence = wrong_item.get("evidence_quote", "")
-                        if evidence:
-                            st.info(f"📄 **원문 근거:** \"{evidence}\"")
-                        
-                        # 각 보기 해설
-                        choices_exp = wrong_item.get("choices_explanation", {})
-                        if choices_exp:
-                            st.markdown("**📋 보기별 해설:**")
-                            for opt in ["A", "B", "C", "D"]:
-                                exp = choices_exp.get(opt, "")
-                                choice_text = choices.get(opt, "")
-                                if opt == correct_ans:
-                                    st.markdown(f"- **{opt}. {choice_text}** ✓ → {exp}")
-                                else:
-                                    st.markdown(f"- {opt}. {choice_text} → {exp}")
-                else:
-                    # 정답인 경우 선택지만 표시
-                    for opt in ["A", "B", "C", "D"]:
-                        choice_text = choices.get(opt, "")
-                        if opt == correct_ans:
-                            st.markdown(f"- **{opt}. {choice_text}** ✓ (정답)")
-                        else:
-                            st.markdown(f"- {opt}. {choice_text}")
-                
-                st.markdown("")  # 여백
+                item = items_by_id.get(qid, {})
+                wrong_item = wrong_items_by_id.get(qid, {})
+                user_ans = user_answers.get(qid) or wrong_item.get("user_answer", "")
+                render_question_result(
+                    mode="audio",
+                    question=q,
+                    item=item,
+                    user_answer=user_ans,
+                    wrong_item=wrong_item,
+                    key_prefix="audio",
+                    navigate_to_page_fn=navigate_to_page,
+                )
+
+            st.divider()
+            render_quiz_takeaways(audio_coach, wrong_items)
             
             # 취약 포인트
             st.divider()
@@ -2918,6 +3210,24 @@ def render_audio_page():
                         # 반복 학습 시작
                         RepeatLearningManager.start_repeat_learning("audio", analyzed_wrong, questions)
                         st.rerun()
+                    entry_payload, entry_q_id = build_repeat_entry_shadowing_payload(
+                        "audio",
+                        wrong_items,
+                        questions,
+                    )
+                    if entry_payload and st.button(
+                        "🗣️ 섀도잉 연습하기",
+                        width="stretch",
+                        key="audio_repeat_shadowing_entry",
+                    ):
+                        st.session_state["shadowing_return_to"] = "results"
+                        st.session_state["repeat_learning_resume"] = {
+                            "mode": "audio",
+                            "q_id": entry_q_id,
+                            "total_retries": 0,
+                        }
+                        st.session_state["force_review_tab"] = True
+                        set_shadowing_payload_and_go(entry_payload, navigate_to_page)
                 else:
                     # 반복 학습 UI 표시
                     render_repeat_learning_ui("audio", key_prefix="audio")
@@ -2951,6 +3261,8 @@ def render_youtube_page():
     - 자동으로 자막이나 오디오를 다운로드하지 않습니다.
     - 사용자가 직접 시청하고 메모한 내용을 입력해주세요.
     """)
+
+    render_learning_top_controls("youtube", navigate_to_page, key_prefix="youtube_top")
     
     # YouTube URL 입력
     st.subheader("1️⃣ YouTube 영상 선택")
@@ -3300,8 +3612,10 @@ Topik utama adalah...""",
                         st.error(f"⚠️ 모든 문제에 답을 선택해주세요! (미선택 문제: {', '.join(['Q' + qid for qid in empty_answers])})")
                     else:
                         try:
-                            condition_simple = condition.split()[0] if condition else "B"
+                            condition_simple = condition or "B"
                             saved_transcript = st.session_state.get("youtube_transcript", "")
+
+                            st.session_state["youtube_user_answers"] = user_answers
                             
                             prompt = safe_prompt_fill(
                                 COACH_PROMPT,
@@ -3315,6 +3629,9 @@ Topik utama adalah...""",
                                 # Structured Outputs 사용
                                 coach = llm_structured(prompt, CoachResponse, model=gen_model)
                                 coach = sanitize_coach_structured(coach, youtube_quiz, user_answers)
+
+                            youtube_quiz = attach_explanations_to_quiz(youtube_quiz, coach, user_answers)
+                            st.session_state["youtube_quiz"] = youtube_quiz
                             
                             st.session_state["youtube_coach"] = coach
                             
@@ -3381,7 +3698,7 @@ Topik utama adalah...""",
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("정답 수", f"{correct}/{total}")
             col2.metric("정답률", f"{percent}%")
-            col3.metric("컨디션", condition.split()[0] if condition else "미설정")
+            col3.metric("컨디션", condition or "미설정")
             col4.metric("영상 ID", f"{result_video_id[:8]}...")
             
             # 오답 풀이 및 해설
@@ -3391,66 +3708,27 @@ Topik utama adalah...""",
             youtube_quiz = st.session_state.get("youtube_quiz", {})
             questions = youtube_quiz.get("questions", [])
             wrong_items = youtube_coach.get("wrong_items", [])
-            wrong_ids = [str(wi.get("id")) for wi in wrong_items]
-            
+            wrong_items_by_id = {str(item.get("id")): item for item in wrong_items}
+            items_by_id = {str(item.get("id")): item for item in youtube_coach.get("items", [])}
+            user_answers = st.session_state.get("youtube_user_answers", {})
+
             for q in questions:
                 qid = str(q.get("id"))
-                is_wrong = qid in wrong_ids
-                
-                # 정답/오답 표시
-                if is_wrong:
-                    st.markdown(f"**Q{qid}. {q.get('question', '')}** ❌")
-                else:
-                    st.markdown(f"**Q{qid}. {q.get('question', '')}** ✅")
-                
-                choices = q.get("choices", {})
-                correct_ans = q.get("answer", "")
-                
-                # 오답인 경우 상세 해설 표시
-                if is_wrong:
-                    wrong_item = next((wi for wi in wrong_items if str(wi.get("id")) == qid), None)
-                    if wrong_item:
-                        user_ans = wrong_item.get("user_answer", "")
-                        
-                        # 내 답 vs 정답
-                        st.warning(f"**내 답:** {user_ans} | **정답:** {correct_ans}")
-                        
-                        # 정답이 정답인 이유
-                        why_correct = wrong_item.get("why_correct_ko", "")
-                        if why_correct:
-                            st.success(f"✅ **정답 해설:** {why_correct}")
-                        
-                        # 내 답이 틀린 이유
-                        why_user_wrong = wrong_item.get("why_user_wrong_ko", "")
-                        if why_user_wrong:
-                            st.error(f"❌ **오답 이유:** {why_user_wrong}")
-                        
-                        # 근거 인용
-                        evidence = wrong_item.get("evidence_quote", "")
-                        if evidence:
-                            st.info(f"📄 **원문 근거:** \"{evidence}\"")
-                        
-                        # 각 보기 해설
-                        choices_exp = wrong_item.get("choices_explanation", {})
-                        if choices_exp:
-                            st.markdown("**📋 보기별 해설:**")
-                            for opt in ["A", "B", "C", "D"]:
-                                exp = choices_exp.get(opt, "")
-                                choice_text = choices.get(opt, "")
-                                if opt == correct_ans:
-                                    st.markdown(f"- **{opt}. {choice_text}** ✓ → {exp}")
-                                else:
-                                    st.markdown(f"- {opt}. {choice_text} → {exp}")
-                else:
-                    # 정답인 경우 선택지만 표시
-                    for opt in ["A", "B", "C", "D"]:
-                        choice_text = choices.get(opt, "")
-                        if opt == correct_ans:
-                            st.markdown(f"- **{opt}. {choice_text}** ✓ (정답)")
-                        else:
-                            st.markdown(f"- {opt}. {choice_text}")
-                
-                st.markdown("")  # 여백
+                item = items_by_id.get(qid, {})
+                wrong_item = wrong_items_by_id.get(qid, {})
+                user_ans = user_answers.get(qid) or wrong_item.get("user_answer", "")
+                render_question_result(
+                    mode="youtube",
+                    question=q,
+                    item=item,
+                    user_answer=user_ans,
+                    wrong_item=wrong_item,
+                    key_prefix="youtube",
+                    navigate_to_page_fn=navigate_to_page,
+                )
+
+            st.divider()
+            render_quiz_takeaways(youtube_coach, wrong_items)
             
             # 취약 포인트
             st.divider()
@@ -3509,6 +3787,24 @@ Topik utama adalah...""",
                         # 반복 학습 시작
                         RepeatLearningManager.start_repeat_learning("video", analyzed_wrong, questions)
                         st.rerun()
+                    entry_payload, entry_q_id = build_repeat_entry_shadowing_payload(
+                        "video",
+                        wrong_items,
+                        questions,
+                    )
+                    if entry_payload and st.button(
+                        "🗣️ 섀도잉 연습하기",
+                        width="stretch",
+                        key="youtube_repeat_shadowing_entry",
+                    ):
+                        st.session_state["shadowing_return_to"] = "results"
+                        st.session_state["repeat_learning_resume"] = {
+                            "mode": "video",
+                            "q_id": entry_q_id,
+                            "total_retries": 0,
+                        }
+                        st.session_state["force_review_tab"] = True
+                        set_shadowing_payload_and_go(entry_payload, navigate_to_page)
                 else:
                     # 반복 학습 UI 표시
                     render_repeat_learning_ui("video", key_prefix="youtube")
@@ -3546,6 +3842,8 @@ def render_text_page():
     
     st.header("📄 텍스트로 학습하기")
     st.markdown("웹 링크를 입력하면 텍스트를 추출하여 학습 자료로 사용합니다.")
+
+    render_learning_top_controls("text", navigate_to_page, key_prefix="text_top")
     
     # 1단계: 웹 링크 입력
     st.subheader("1️⃣ 웹 링크 입력")
@@ -3714,8 +4012,10 @@ def render_text_page():
                         st.error(f"⚠️ 모든 문제에 답을 선택해주세요! (미선택 문제: {', '.join(['Q' + qid for qid in empty_answers])})")
                     else:
                         try:
-                            condition_simple = condition.split()[0] if condition else "B"
+                            condition_simple = condition or "B"
                             saved_text = st.session_state.get("extracted_text", "")
+
+                            st.session_state["text_user_answers"] = user_answers
                             
                             prompt = safe_prompt_fill(
                                 COACH_PROMPT,
@@ -3729,6 +4029,9 @@ def render_text_page():
                                 # Structured Outputs 사용
                                 coach = llm_structured(prompt, CoachResponse, model=gen_model)
                                 coach = sanitize_coach_structured(coach, text_quiz, user_answers)
+
+                            text_quiz = attach_explanations_to_quiz(text_quiz, coach, user_answers)
+                            st.session_state["text_quiz"] = text_quiz
                             
                             st.session_state["text_coach"] = coach
                             
@@ -3792,7 +4095,7 @@ def render_text_page():
             col1, col2, col3 = st.columns(3)
             col1.metric("정답 수", f"{correct}/{total}")
             col2.metric("정답률", f"{percent}%")
-            col3.metric("컨디션", condition.split()[0] if condition else "미설정")
+            col3.metric("컨디션", condition or "미설정")
             
             # 오답 풀이 및 해설
             st.divider()
@@ -3801,66 +4104,27 @@ def render_text_page():
             text_quiz = st.session_state.get("text_quiz", {})
             questions = text_quiz.get("questions", [])
             wrong_items = text_coach.get("wrong_items", [])
-            wrong_ids = [str(wi.get("id")) for wi in wrong_items]
-            
+            wrong_items_by_id = {str(item.get("id")): item for item in wrong_items}
+            items_by_id = {str(item.get("id")): item for item in text_coach.get("items", [])}
+            user_answers = st.session_state.get("text_user_answers", {})
+
             for q in questions:
                 qid = str(q.get("id"))
-                is_wrong = qid in wrong_ids
-                
-                # 정답/오답 표시
-                if is_wrong:
-                    st.markdown(f"**Q{qid}. {q.get('question', '')}** ❌")
-                else:
-                    st.markdown(f"**Q{qid}. {q.get('question', '')}** ✅")
-                
-                choices = q.get("choices", {})
-                correct_ans = q.get("answer", "")
-                
-                # 오답인 경우 상세 해설 표시
-                if is_wrong:
-                    wrong_item = next((wi for wi in wrong_items if str(wi.get("id")) == qid), None)
-                    if wrong_item:
-                        user_ans = wrong_item.get("user_answer", "")
-                        
-                        # 내 답 vs 정답
-                        st.warning(f"**내 답:** {user_ans} | **정답:** {correct_ans}")
-                        
-                        # 정답이 정답인 이유
-                        why_correct = wrong_item.get("why_correct_ko", "")
-                        if why_correct:
-                            st.success(f"✅ **정답 해설:** {why_correct}")
-                        
-                        # 내 답이 틀린 이유
-                        why_user_wrong = wrong_item.get("why_user_wrong_ko", "")
-                        if why_user_wrong:
-                            st.error(f"❌ **오답 이유:** {why_user_wrong}")
-                        
-                        # 근거 인용
-                        evidence = wrong_item.get("evidence_quote", "")
-                        if evidence:
-                            st.info(f"📄 **원문 근거:** \"{evidence}\"")
-                        
-                        # 각 보기 해설
-                        choices_exp = wrong_item.get("choices_explanation", {})
-                        if choices_exp:
-                            st.markdown("**📋 보기별 해설:**")
-                            for opt in ["A", "B", "C", "D"]:
-                                exp = choices_exp.get(opt, "")
-                                choice_text = choices.get(opt, "")
-                                if opt == correct_ans:
-                                    st.markdown(f"- **{opt}. {choice_text}** ✓ → {exp}")
-                                else:
-                                    st.markdown(f"- {opt}. {choice_text} → {exp}")
-                else:
-                    # 정답인 경우 선택지만 표시
-                    for opt in ["A", "B", "C", "D"]:
-                        choice_text = choices.get(opt, "")
-                        if opt == correct_ans:
-                            st.markdown(f"- **{opt}. {choice_text}** ✓ (정답)")
-                        else:
-                            st.markdown(f"- {opt}. {choice_text}")
-                
-                st.markdown("")  # 여백
+                item = items_by_id.get(qid, {})
+                wrong_item = wrong_items_by_id.get(qid, {})
+                user_ans = user_answers.get(qid) or wrong_item.get("user_answer", "")
+                render_question_result(
+                    mode="text",
+                    question=q,
+                    item=item,
+                    user_answer=user_ans,
+                    wrong_item=wrong_item,
+                    key_prefix="text",
+                    navigate_to_page_fn=navigate_to_page,
+                )
+
+            st.divider()
+            render_quiz_takeaways(text_coach, wrong_items)
             
             # 취약 포인트
             st.divider()
@@ -3919,6 +4183,24 @@ def render_text_page():
                         # 반복 학습 시작
                         RepeatLearningManager.start_repeat_learning("text", analyzed_wrong, questions)
                         st.rerun()
+                    entry_payload, entry_q_id = build_repeat_entry_shadowing_payload(
+                        "text",
+                        wrong_items,
+                        questions,
+                    )
+                    if entry_payload and st.button(
+                        "🗣️ 섀도잉 연습하기",
+                        width="stretch",
+                        key="text_repeat_shadowing_entry",
+                    ):
+                        st.session_state["shadowing_return_to"] = "results"
+                        st.session_state["repeat_learning_resume"] = {
+                            "mode": "text",
+                            "q_id": entry_q_id,
+                            "total_retries": 0,
+                        }
+                        st.session_state["force_review_tab"] = True
+                        set_shadowing_payload_and_go(entry_payload, navigate_to_page)
                 else:
                     # 반복 학습 UI 표시
                     render_repeat_learning_ui("text", key_prefix="text")
@@ -3939,6 +4221,128 @@ def render_text_page():
     # ✅ 페이지 하단 중앙 홈 버튼
     render_home_button_bottom(key="home_from_text")
 
+def render_shadowing_payload_block(navigate_to_page_fn, key_prefix: str = "shadowing"):
+    payload = st.session_state.get("shadowing_payload")
+    if not payload:
+        return
+
+    st.subheader("오답 섀도잉")
+    return_to = st.session_state.get("shadowing_return_to", "results")
+
+    col_back, col_done = st.columns(2)
+    with col_back:
+        if st.button("⬅️ 돌아가기", width="stretch", key=f"{key_prefix}_payload_back"):
+            navigate_to_page_fn(return_to)
+    with col_done:
+        if st.button("연습 완료", type="primary", width="stretch", key=f"{key_prefix}_payload_done"):
+            st.session_state.pop("shadowing_payload", None)
+            navigate_to_page_fn(return_to)
+
+    target_text = (payload.get("target_text") or "").strip()
+    if target_text:
+        st.markdown(f"## {target_text}")
+
+    question_text = payload.get("question", "")
+    correct_answer = payload.get("correct_answer", "")
+    user_answer = payload.get("user_answer", "")
+    rationale = payload.get("rationale", "")
+
+    if question_text or correct_answer:
+        st.markdown("**문맥**")
+        if question_text:
+            st.markdown(f"- 문제: {question_text}")
+        if correct_answer:
+            st.markdown(f"- 정답: {correct_answer}")
+        if user_answer:
+            st.markdown(f"- 내 답: {user_answer}")
+        if rationale:
+            st.markdown(f"- 해설: {rationale}")
+
+    audio_ref = payload.get("audio_ref")
+    if isinstance(audio_ref, dict):
+        audio_ref = audio_ref.get("url") or audio_ref.get("path")
+    if audio_ref:
+        st.audio(audio_ref)
+
+    speed = st.selectbox(
+        "재생 속도",
+        options=list(TTS_SPEED_OPTIONS.keys()),
+        format_func=lambda x: TTS_SPEED_OPTIONS[x]["label"],
+        index=2,
+        key=f"{key_prefix}_payload_speed",
+    )
+
+    if target_text:
+        render_tts_player(target_text, "", speed, f"{key_prefix}_payload")
+
+    st.divider()
+
+
+def render_speaking_hub(key_prefix: str = "speaking_hub"):
+    mode_labels = {
+        "audio": "Audio",
+        "video": "Video",
+        "text": "Text",
+        "speaking": "Speaking",
+        "all": "All",
+    }
+
+    selected_mode = st.radio(
+        "모드 선택",
+        options=["all", *MODES],
+        format_func=lambda x: mode_labels.get(x, x.title()),
+        horizontal=True,
+        key=f"{key_prefix}_mode_selector",
+    )
+
+    speed = st.selectbox(
+        "재생 속도",
+        options=list(TTS_SPEED_OPTIONS.keys()),
+        format_func=lambda x: TTS_SPEED_OPTIONS[x]["label"],
+        index=2,
+        key=f"{key_prefix}_speed_select",
+    )
+
+    if selected_mode == "all":
+        for mode in MODES:
+            st.markdown(f"#### {mode_labels.get(mode, mode.title())}")
+            items = get_mode_state(mode).get("shadowing_items", [])
+            render_mode_shadowing_items(mode, items, speed)
+            st.divider()
+    else:
+        items = get_mode_state(selected_mode).get("shadowing_items", [])
+        render_mode_shadowing_items(selected_mode, items, speed)
+
+    st.divider()
+    st.markdown("#### ✍️ 직접 입력하여 연습")
+
+    custom_text = st.text_area(
+        "인도네시아어 문장 입력",
+        placeholder="Selamat pagi! Apa kabar?",
+        height=100,
+        key=f"{key_prefix}_custom_text",
+    )
+
+    if custom_text:
+        render_tts_player(custom_text, "", speed, f"{key_prefix}_custom")
+
+
+def render_speaking_page():
+    st.subheader("🗣️ 섀도잉 연습")
+    if "shadowing_payload" not in st.session_state:
+        return_to = st.session_state.get("shadowing_return_to", "results")
+        col_back, col_done = st.columns(2)
+        with col_back:
+            if st.button("⬅️ 돌아가기", width="stretch", key="speaking_page_back"):
+                navigate_to_page(return_to)
+        with col_done:
+            if st.button("연습 완료", type="primary", width="stretch", key="speaking_page_done"):
+                st.session_state.pop("shadowing_payload", None)
+                navigate_to_page(return_to)
+    render_shadowing_payload_block(navigate_to_page, key_prefix="speaking_page")
+    render_speaking_hub(key_prefix="speaking_page")
+    render_home_button_bottom(key="home_from_speaking")
+
 def render_results_page():
     """학습 결과 페이지 렌더링"""
 
@@ -3951,6 +4355,9 @@ def render_results_page():
         ("quiz", UI["tab_quiz"]),
         ("memory", UI["tab_memory"]),
     ]
+
+    if st.session_state.pop("force_review_tab", False):
+        st.session_state["progress_tab"] = "review"
 
     if "progress_tab" not in st.session_state:
         st.session_state["progress_tab"] = "dashboard"
@@ -4129,6 +4536,9 @@ def render_results_page():
             "speaking": "Speaking",
         }
 
+        resume = st.session_state.get("repeat_learning_resume", {})
+        resume_mode = resume.get("mode")
+
         for mode in MODES:
             mode_state = get_mode_state(mode)
             summary = mode_state.get("review_summary", {})
@@ -4152,6 +4562,11 @@ def render_results_page():
                     st.caption(f"마지막 시도: {summary.get('timestamp')}")
             else:
                 st.caption("아직 학습 결과가 없습니다.")
+
+            if resume_mode == mode and repeat_progress["active"]:
+                render_repeat_learning_ui(mode, key_prefix=f"review_{mode}")
+                st.divider()
+                continue
 
             if repeat_progress["active"]:
                 render_repeat_learning_ui(mode, key_prefix=f"review_{mode}")
@@ -4180,6 +4595,8 @@ def render_results_page():
                     - 정답: {item.get('correct_answer', '?')} ✅
                     """)
 
+                    st.caption("💡 반복 학습에서 섀도잉 연습을 진행할 수 있습니다.")
+
             if st.button(
                 "🚀 반복 학습 시작!",
                 type="primary",
@@ -4196,52 +4613,8 @@ def render_results_page():
     # ==========================================
     if active_tab == "speaking":
         st.subheader("🗣️ 섀도잉 연습")
-
-        mode_labels = {
-            "audio": "Audio",
-            "video": "Video",
-            "text": "Text",
-            "speaking": "Speaking",
-            "all": "All",
-        }
-
-        selected_mode = st.radio(
-            "모드 선택",
-            options=["all", *MODES],
-            format_func=lambda x: mode_labels.get(x, x.title()),
-            horizontal=True,
-            key="shadowing_mode_selector",
-        )
-
-        speed = st.selectbox(
-            "재생 속도",
-            options=list(TTS_SPEED_OPTIONS.keys()),
-            format_func=lambda x: TTS_SPEED_OPTIONS[x]["label"],
-            index=2,
-            key="shadowing_speed_select_global",
-        )
-
-        if selected_mode == "all":
-            for mode in MODES:
-                st.markdown(f"#### {mode_labels.get(mode, mode.title())}")
-                items = get_mode_state(mode).get("shadowing_items", [])
-                render_mode_shadowing_items(mode, items, speed)
-                st.divider()
-        else:
-            items = get_mode_state(selected_mode).get("shadowing_items", [])
-            render_mode_shadowing_items(selected_mode, items, speed)
-
-        st.divider()
-        st.markdown("#### ✍️ 직접 입력하여 연습")
-
-        custom_text = st.text_area(
-            "인도네시아어 문장 입력",
-            placeholder="Selamat pagi! Apa kabar?",
-            height=100,
-        )
-
-        if custom_text:
-            render_tts_player(custom_text, "", speed, "custom")
+        render_shadowing_payload_block(navigate_to_page, key_prefix="results_speaking")
+        render_speaking_hub(key_prefix="results_speaking")
     
     # ==========================================
     # 탭 4: 현재 세션 퀴즈 (기존 기능)
@@ -4356,7 +4729,7 @@ def render_results_page():
                         st.error(f"⚠️ 모든 문제에 답을 선택해주세요! (미선택 문제: {', '.join(['Q' + qid for qid in empty_answers])})")
                     else:
                         try:
-                            condition_simple = condition.split()[0] if condition else "B"
+                            condition_simple = condition or "B"
                             
                             # user_answers를 session_state에 저장 (payload에서 사용하기 위함)
                             st.session_state["tab4_user_answers"] = user_answers
@@ -4407,7 +4780,7 @@ def render_results_page():
             col1, col2, col3 = st.columns(3)
             col1.metric("정답 수", f"{correct}/{total}")
             col2.metric("정답률", f"{percent}%")
-            col3.metric("컨디션", condition.split()[0] if condition else "미설정")
+            col3.metric("컨디션", condition or "미설정")
             
             st.divider()
             
@@ -4961,6 +5334,8 @@ elif current_page == "text":
     render_text_page()
 elif current_page == "results":
     render_results_page()
+elif current_page == "speaking":
+    render_speaking_page()
 elif current_page == "settings":
     render_settings_page()
 else:
