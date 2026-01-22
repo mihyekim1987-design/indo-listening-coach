@@ -66,9 +66,11 @@ QUIZ_PROMPT = """역할: 당신은 인도네시아어(Indonesian) 평가 출제�
 - [TRANSCRIPT]는 학습용 오디오 또는 텍스트를 받아쓴 인도네시아어 원문입니다.
 - [NUM_QUESTIONS]는 생성할 문제 수입니다.
 - [LEVEL]는 학습 수준입니다 (A1~A2, B1~B2).
+- [LEVEL_PROFILE]은 난이도/문장 길이/어휘/오답 수준 지침입니다.
 
 목표:
 TRANSCRIPT를 바탕으로 {level} 수준의 4지선다 문제 {num_questions}개를 만드세요.
+LEVEL_PROFILE 지침을 반드시 반영하세요.
 
 필수 규칙:
 - 출력은 반드시 JSON만 반환(추가 설명 금지)
@@ -77,8 +79,8 @@ TRANSCRIPT를 바탕으로 {level} 수준의 4지선다 문제 {num_questions}�
 - 각 문제는 TRANSCRIPT에서 정답 근거를 찾을 수 있어야 함
 - 오답은 그럴듯하되 TRANSCRIPT와 명확히 불일치해야 함
 - questions는 반드시 {num_questions}개, id는 1~{num_questions}
-- 초급(A1~A2): 쉬운 단어, 짧은 문장
-- 중급(B1~B2): 다양한 어휘, 복잡한 문장 구조 가능
+- 초급(A1~A2): 쉬운 단어, 짧은 문장, 쉬운 오답
+- 중급(B1~B2): 다양한 어휘, 더 긴 문장, 미묘한 오답
 
 출력 JSON 스키마:
 {{
@@ -102,6 +104,9 @@ TRANSCRIPT를 바탕으로 {level} 수준의 4지선다 문제 {num_questions}�
 
 [TRANSCRIPT]
 {transcript}
+
+[LEVEL_PROFILE]
+{level_profile}
 
 IMPORTANT NOTE: Start directly with the JSON output. Do not output any delimiters or explanations.
 """
@@ -183,6 +188,51 @@ COACH_PROMPT = """역할: 당신은 인도네시아어 초급(A1~A2) 학습 코�
 
 [CONDITION]
 {condition}
+
+IMPORTANT NOTE: Start directly with the JSON output. Do not output any delimiters or explanations.
+"""
+
+
+# =====================================================
+# 3-1. YouTube 쓰기 피드백 프롬프트
+# =====================================================
+
+YOUTUBE_WRITING_FEEDBACK_PROMPT = """역할: 당신은 인도네시아어 쓰기 교정 코치입니다.
+
+입력:
+- [LEVEL]는 학습 수준입니다 (초급 A1~A2, 중급 B1~B2).
+- [TRANSCRIPT]는 참고용 원문(인도네시아어)입니다.
+- [USER_TEXT]는 학습자가 작성한 인도네시아어 글입니다.
+
+목표:
+학습자의 문장을 초급 친화적으로 교정하고, 간단한 이유를 한국어로 설명하세요.
+
+필수 규칙:
+- 출력은 반드시 JSON만 반환(추가 설명 금지)
+- corrected_text는 인도네시아어로 제공
+- fixes는 2~4개만 제공 (간단한 문법/단어 선택 중심)
+- why_ko는 쉬운 한국어로 설명 (전문 용어 최소화)
+- tips_ko는 3개, 매우 짧게 (한 문장 이하)
+
+출력 JSON 스키마:
+{{
+  "corrected_text_id": "string",
+  "corrected_text": "string",
+  "fixes": [
+    {{"type": "grammar|word_choice", "before": "string", "after": "string", "why_ko": "string"}}
+  ],
+  "overall_comment_ko": "string",
+  "tips_ko": ["string", "string", "string"]
+}}
+
+[LEVEL]
+{level}
+
+[TRANSCRIPT]
+{transcript}
+
+[USER_TEXT]
+{user_text}
 
 IMPORTANT NOTE: Start directly with the JSON output. Do not output any delimiters or explanations.
 """

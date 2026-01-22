@@ -15,6 +15,7 @@ import re
 import glob
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
+from typing import Optional
 import streamlit as st
 import numpy as np
 import soundfile as sf
@@ -49,7 +50,7 @@ from typing import Dict, List, Optional
 # 프롬프트 불러오기
 import prompts as P
 
-missing = [name for name in ["QUIZ_PROMPT", "COACH_PROMPT", "EDUCATIONAL_ANALYSIS_PROMPT", "AI_LEARNING_COACH_PROMPT"] if not hasattr(P, name)]
+missing = [name for name in ["QUIZ_PROMPT", "COACH_PROMPT", "EDUCATIONAL_ANALYSIS_PROMPT", "AI_LEARNING_COACH_PROMPT", "YOUTUBE_WRITING_FEEDBACK_PROMPT"] if not hasattr(P, name)]
 if missing:
     raise ImportError(
         f"[prompts import check] Missing: {missing}\n"
@@ -61,6 +62,7 @@ QUIZ_PROMPT = P.QUIZ_PROMPT
 COACH_PROMPT = P.COACH_PROMPT
 EDUCATIONAL_ANALYSIS_PROMPT = P.EDUCATIONAL_ANALYSIS_PROMPT
 AI_LEARNING_COACH_PROMPT = P.AI_LEARNING_COACH_PROMPT
+YOUTUBE_WRITING_FEEDBACK_PROMPT = P.YOUTUBE_WRITING_FEEDBACK_PROMPT
 
 # 상수 정의
 APP_TITLE = "Bisa Q"  # 브라우저 탭(title)용
@@ -1139,6 +1141,8 @@ class RepeatLearningManager:
         mode_state["retry_completed"] = False
         mode_state["retry_mastered"] = False
         mode_state["retry_quiz"] = {"questions": quiz_questions}
+
+        init_shadowing_review_bank(mode, wrong_items, quiz_questions)
         
         # quiz_questions를 딕셔너리로 변환
         q_dict = {str(q.get("id")): q for q in quiz_questions}
@@ -1970,6 +1974,8 @@ def render_repeat_learning_ui(mode: str, key_prefix: str = ""):
         mode_state["retry_mastered"] = True
         
         st.success("🎉 모든 문제를 정복했습니다! 훌륭해요!")
+
+        render_shadowing_review_dropdown(navigate_to_page, mode, key_prefix=f"{key_prefix}_review")
         
         # 완료 통계
         completed = state.get("completed", [])
@@ -2027,22 +2033,6 @@ def render_repeat_learning_ui(mode: str, key_prefix: str = ""):
         return False
     
     st.markdown(f"**{question_text}**")
-
-    shadowing_answer = st.session_state.get(f"{key_prefix}_repeat_answer_{q_id}", "")
-    shadowing_payload = build_shadowing_payload(mode, current_q, current_q, shadowing_answer or "")
-    if st.button(
-        "🗣️ 섀도잉 연습하기",
-        width="stretch",
-        key=f"{key_prefix}_repeat_shadowing_{q_id}_{progress['total_retries']}",
-    ):
-        st.session_state["shadowing_return_to"] = "results"
-        st.session_state["repeat_learning_resume"] = {
-            "mode": mode,
-            "q_id": str(q_id),
-            "total_retries": progress.get("total_retries", 0),
-        }
-        st.session_state["force_review_tab"] = True
-        set_shadowing_payload_and_go(shadowing_payload, navigate_to_page)
     
     # 선택지
     choices = current_q.get("choices", {})
@@ -2077,6 +2067,7 @@ def render_repeat_learning_ui(mode: str, key_prefix: str = ""):
             st.error("답을 선택해주세요!")
         else:
             is_correct, result = RepeatLearningManager.check_answer(mode, answer)
+            update_shadowing_review_bank_answer(q_id, answer)
             
             if is_correct:
                 st.success(f"🎉 정답입니다! ({result['retry_count']}번 만에 성공)")
@@ -2104,6 +2095,26 @@ def render_repeat_learning_ui(mode: str, key_prefix: str = ""):
                 RepeatLearningManager.replace_with_similar(mode, similar)
                 st.success("✅ 유사 문제가 생성되었습니다!")
                 st.rerun()
+
+    st.divider()
+    render_shadowing_review_dropdown(navigate_to_page, mode, key_prefix=f"{key_prefix}_review_active")
+
+    st.markdown("#### 🗣️ 현재 문제 섀도잉")
+    shadowing_answer = st.session_state.get(f"{key_prefix}_repeat_answer_{q_id}", "")
+    shadowing_payload = build_shadowing_payload(mode, current_q, current_q, shadowing_answer or "")
+    if st.button(
+        "🗣️ 섀도잉 연습하기",
+        width="stretch",
+        key=f"{key_prefix}_repeat_shadowing_{q_id}_{progress['total_retries']}",
+    ):
+        st.session_state["shadowing_return_to"] = "results"
+        st.session_state["repeat_learning_resume"] = {
+            "mode": mode,
+            "q_id": str(q_id),
+            "total_retries": progress.get("total_retries", 0),
+        }
+        st.session_state["force_review_tab"] = True
+        set_shadowing_payload_and_go(shadowing_payload, navigate_to_page)
     
     return True
 
@@ -2356,6 +2367,66 @@ def _first_sentence(text: str) -> str:
     return cleaned
 
 
+def is_debug_mode() -> bool:
+    if st.session_state.get("debug_mode_enabled"):
+        return True
+
+    try:
+        qp = st.query_params
+        debug_val = qp.get("debug")
+        if isinstance(debug_val, list):
+            debug_val = debug_val[0] if debug_val else None
+        if str(debug_val).strip().lower() in ("1", "true", "yes", "y", "on"):
+            st.session_state["debug_mode_enabled"] = True
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _normalize_answer(a: str) -> str:
+    return (a or "").strip().upper()
+
+
+def _normalize_user_answers(m: dict) -> dict:
+    if not isinstance(m, dict):
+        return {}
+    return {str(k): _normalize_answer(v) for k, v in m.items() if v is not None}
+
+
+def render_debug_line(
+    *,
+    qid: str,
+    user_answer_raw: str,
+    user_answer_norm: str,
+    correct_answer_raw: str,
+    correct_answer_norm: str,
+    computed_is_correct,
+    coach_is_correct,
+    wrong_item_present: bool,
+    evidence_present: bool,
+) -> None:
+    if not is_debug_mode():
+        return
+
+    st.caption(
+        " · ".join(
+            [
+                f"`debug` qid={qid}",
+                f"ua_raw={user_answer_raw!r}",
+                f"ua={user_answer_norm or '∅'}",
+                f"ca_raw={correct_answer_raw!r}",
+                f"ca={correct_answer_norm or '∅'}",
+                f"computed={computed_is_correct}",
+                f"coach_is_correct={coach_is_correct}",
+                f"wrong_item={wrong_item_present}",
+                f"evidence={evidence_present}",
+            ]
+        )
+    )
+
+
 def _build_item_summary(correct_explain: str, evidence: str, correct_answer: str) -> str:
     if correct_explain:
         return _first_sentence(correct_explain)
@@ -2432,6 +2503,7 @@ def build_shadowing_payload(mode: str, question: dict, item: dict, user_answer: 
     audio_ref = question.get("audio_ref") or question.get("audio_url") or None
 
     return {
+        "id": str(question.get("id", item.get("id", ""))),
         "source": source,
         "target_text": pick_shadowing_target(question, item),
         "question": question.get("question", ""),
@@ -2441,6 +2513,87 @@ def build_shadowing_payload(mode: str, question: dict, item: dict, user_answer: 
         "evidence_quote": evidence,
         "audio_ref": audio_ref,
     }
+
+
+def init_shadowing_review_bank(mode: str, wrong_items: list, quiz_questions: list) -> list:
+    q_dict = {str(q.get("id")): q for q in quiz_questions}
+    bank = []
+    for item in wrong_items:
+        q_id = str(item.get("id") or item.get("question_id", ""))
+        question = q_dict.get(q_id, {})
+        target_question = question if question else item
+        payload = build_shadowing_payload(mode, target_question, item, item.get("user_answer", ""))
+        bank.append({
+            "id": str(payload.get("id") or q_id),
+            "source": payload.get("source"),
+            "target_text": payload.get("target_text"),
+            "question": payload.get("question"),
+            "correct_answer": payload.get("correct_answer"),
+            "user_answer": payload.get("user_answer"),
+            "rationale": payload.get("rationale"),
+            "evidence_quote": payload.get("evidence_quote"),
+            "audio_ref": payload.get("audio_ref"),
+        })
+    st.session_state["shadowing_review_bank"] = bank
+    if bank:
+        selected_id = st.session_state.get("shadowing_review_selected")
+        if selected_id not in {item.get("id") for item in bank}:
+            st.session_state["shadowing_review_selected"] = bank[0].get("id")
+    return bank
+
+
+def update_shadowing_review_bank_answer(question_id: str, user_answer: str) -> None:
+    bank = st.session_state.get("shadowing_review_bank", [])
+    if not bank:
+        return
+    for item in bank:
+        if str(item.get("id")) == str(question_id):
+            item["user_answer"] = user_answer
+            break
+
+
+def _shadowing_review_label(item: dict) -> str:
+    source_label = {
+        "audio": "Audio",
+        "youtube": "YouTube",
+        "text": "Text",
+    }.get(item.get("source"), "Source")
+    target_text = (item.get("target_text") or "").strip().replace("\n", " ")
+    snippet = (target_text[:30] + "...") if len(target_text) > 30 else target_text
+    return f"[{source_label}] Q{item.get('id')} - {snippet}"
+
+
+def render_shadowing_review_dropdown(navigate_to_page_fn, mode: str, key_prefix: str = "shadowing_review") -> None:
+    bank = st.session_state.get("shadowing_review_bank", [])
+    if not bank:
+        return
+    st.markdown("#### 🗂️ 섀도잉 복습 리스트")
+    options = [item.get("id") for item in bank if item.get("id")]
+    if not options:
+        return
+    selected_id = st.session_state.get("shadowing_review_selected")
+    if selected_id not in options:
+        selected_id = options[0]
+    selected_id = st.selectbox(
+        "복습할 섀도잉 항목 선택",
+        options=options,
+        index=options.index(selected_id),
+        key=f"{key_prefix}_select",
+        format_func=lambda opt: _shadowing_review_label(next((i for i in bank if i.get("id") == opt), {})),
+    )
+    st.session_state["shadowing_review_selected"] = selected_id
+    selected_item = next((item for item in bank if item.get("id") == selected_id), None)
+    if st.button("🗣️ 섀도잉 연습하기", width="stretch", key=f"{key_prefix}_go"):
+        if selected_item:
+            st.session_state["shadowing_return_to"] = "results"
+            state = RepeatLearningManager.get_state(mode)
+            st.session_state["repeat_learning_resume"] = {
+                "mode": mode,
+                "q_id": str(selected_item.get("id")),
+                "total_retries": state.get("total_retries", 0),
+            }
+            st.session_state["force_review_tab"] = True
+            set_shadowing_payload_and_go(selected_item, navigate_to_page_fn)
 
 
 def build_repeat_entry_shadowing_payload(mode: str, wrong_items: list, quiz_questions: list):
@@ -2492,26 +2645,61 @@ def render_question_result(
     mode: str,
     question: dict,
     item: dict,
-    user_answer: str,
     wrong_item: dict,
-    key_prefix: str,
+    user_answer: str,
     navigate_to_page_fn,
+    key_prefix: str,
+    wrong_items_by_id: Optional[dict] = None,
 ) -> None:
     qid = str(question.get("id"))
     question_text = question.get("question", "")
-    is_correct = item.get("is_correct") if item else (user_answer == question.get("answer", ""))
-    status_emoji = "✅" if is_correct else "❌"
+    item = item or {}
+    correct_raw = (
+        question.get("answer")
+        or question.get("correct_answer")
+        or item.get("correct_answer")
+        or ""
+    ).strip()
+    correct_norm = _normalize_answer(correct_raw)
+    ua_raw = (user_answer or "").strip()
+    ua_norm = _normalize_answer(ua_raw)
+
+    if ua_norm and correct_norm:
+        computed_is_correct = (ua_norm == correct_norm)
+    elif "is_correct" in item:
+        computed_is_correct = bool(item.get("is_correct"))
+    else:
+        computed_is_correct = False
+
+    coach_is_correct = item.get("is_correct") if item else None
+    wrong_item_present = bool(wrong_item) or (
+        qid in wrong_items_by_id if wrong_items_by_id is not None else False
+    )
+    evidence_present = bool(item.get("evidence_quote") or question.get("evidence_quote"))
+    # computed_is_correct must be defined before status_emoji.
+    status_emoji = "✅" if computed_is_correct else "❌"
 
     expander_label = f"Q{qid}. {question_text} {status_emoji}"
-    with st.expander(expander_label, expanded=not is_correct):
-        correct_answer = question.get("answer", "")
+    with st.expander(expander_label, expanded=not computed_is_correct):
+        correct_answer = correct_raw
         choices = question.get("choices", {}) or {}
         explanation = question.get("explanation", {})
         evidence = item.get("evidence_quote") or question.get("evidence_quote", "")
 
-        st.markdown(f"**정답:** {correct_answer} | **내 답:** {user_answer or '미선택'}")
+        st.markdown(f"**정답:** {correct_answer} | **내 답:** {ua_raw or '미선택'}")
+        render_debug_line(
+            qid=qid,
+            user_answer_raw=ua_raw,
+            user_answer_norm=ua_norm,
+            correct_answer_raw=correct_raw,
+            correct_answer_norm=correct_norm,
+            computed_is_correct=computed_is_correct,
+            coach_is_correct=coach_is_correct,
+            wrong_item_present=wrong_item_present,
+            evidence_present=evidence_present,
+        )
 
-        if is_correct:
+        if computed_is_correct:
             correct_explain = explanation.get("correct") or item.get("correct_explain_ko", "")
             if correct_explain:
                 st.markdown(f"✅ **왜 맞는가:** {correct_explain}")
@@ -2526,7 +2714,7 @@ def render_question_result(
         else:
             wrong_reason = item.get("wrong_reason_ko", "")
             if not wrong_reason and explanation.get("options"):
-                wrong_reason = explanation.get("options", {}).get(user_answer, "")
+                wrong_reason = explanation.get("options", {}).get(ua_raw, "")
             if wrong_reason:
                 st.markdown(f"❌ **내 답이 왜 틀렸는가:** {wrong_reason}")
 
@@ -2543,7 +2731,7 @@ def render_question_result(
                     label = f"{opt}. {choice_text}"
                     if opt == correct_answer:
                         label = f"**{label}** ✅"
-                    if opt == user_answer and opt != correct_answer:
+                    if opt == ua_raw and opt != correct_answer:
                         label = f"**{label}** ❌ 내 선택"
                     st.markdown(f"- {label} — {exp}")
         if evidence:
@@ -2553,7 +2741,7 @@ def render_question_result(
         if summary:
             st.caption(f"이 문항 요약: {summary}")
 
-        if not is_correct:
+        if not computed_is_correct:
             st.caption("💡 반복 학습에서 섀도잉 연습을 진행할 수 있습니다.")
 
 
@@ -2586,6 +2774,20 @@ MODE_TO_LEVEL = {
     "BIPA (초급)": "초급 (A1~A2)",
     "BIPA (중급)": "중급 (B1~B2)",
 }
+LEVEL_PROFILE = {
+    "초급 (A1~A2)": {
+        "difficulty": "easy",
+        "sentence_len": "short",
+        "vocab": "basic",
+        "distractors": "obvious",
+    },
+    "중급 (B1~B2)": {
+        "difficulty": "medium",
+        "sentence_len": "medium",
+        "vocab": "intermediate",
+        "distractors": "subtle",
+    },
+}
 DEFAULT_NUM_QUESTIONS = 5
 DEFAULT_LEVEL = "초급 (A1~A2)"
 LEGACY_CONDITION_TO_CODE = {label: code for code, label in CONDITION_LABELS.items()}
@@ -2612,6 +2814,17 @@ def get_learning_settings_state() -> dict:
         "level": level,
         "condition_simple": effective_condition,
     }
+
+
+def level_profile_prompt(level: str) -> str:
+    profile = LEVEL_PROFILE.get(level, LEVEL_PROFILE[DEFAULT_LEVEL])
+    return (
+        f"- difficulty: {profile['difficulty']}\n"
+        f"- sentence_length: {profile['sentence_len']}\n"
+        f"- vocabulary: {profile['vocab']}\n"
+        f"- distractors: {profile['distractors']}\n"
+        "Apply these constraints consistently across questions and options."
+    )
 
 
 def render_learning_top_controls(mode: str, navigate_to_page_fn, key_prefix: str):
@@ -2726,7 +2939,7 @@ def render_learning_top_controls(mode: str, navigate_to_page_fn, key_prefix: str
         st.caption(" | ".join(status_bits))
 
 # 디버그 모드 변수 (전역에서 사용 가능하도록)
-debug = st.session_state.get("debug_mode_enabled", False)
+debug = is_debug_mode()
 gen_model = st.session_state.get("gen_model", "gpt-4o-mini")
 _learning_settings = get_learning_settings_state()
 condition = _learning_settings["condition"]
@@ -2974,7 +3187,8 @@ def render_audio_page():
                     QUIZ_PROMPT,
                     num_questions=str(num_questions),
                     transcript=quiz_text,
-                    level=level
+                    level=level,
+                    level_profile=level_profile_prompt(level),
                 )
 
                 
@@ -3043,7 +3257,7 @@ def render_audio_page():
                         try:
                             condition_simple = condition or "B"
 
-                            st.session_state["audio_user_answers"] = user_answers
+                            st.session_state["audio_user_answers"] = _normalize_user_answers(user_answers)
                             
                             prompt = safe_prompt_fill(
                                 COACH_PROMPT,
@@ -3147,6 +3361,7 @@ def render_audio_page():
                     item=item,
                     user_answer=user_ans,
                     wrong_item=wrong_item,
+                    wrong_items_by_id=wrong_items_by_id,
                     key_prefix="audio",
                     navigate_to_page_fn=navigate_to_page,
                 )
@@ -3413,65 +3628,84 @@ def render_youtube_page():
                 paragraph_count = fetched_subtitle.count("\n\n") + 1
                 st.caption(f"📊 자막 길이: {len(fetched_subtitle)}자 | 문단 수: {paragraph_count}개")
             
-            # ===== 3️⃣ 영상 내용 요약 작성 섹션 =====
+            # ===== 3️⃣ 쉬운 글쓰기 + 문법 피드백 섹션 =====
             st.divider()
-            st.subheader("3️⃣ 영상 내용 요약 작성")
-            
-            st.markdown(f"""
-            **📝 이 영상(`{video_id}`)에 대한 요약을 작성해주세요.**
-            
-            - 위에서 자막을 가져왔다면 참고하여 요약을 작성하세요.
-            - 또는 영상을 시청하고 직접 내용을 정리하세요.
-            """)
-            
-            with st.expander("💡 인도네시아어 요약 작성 팁", expanded=False):
-                st.markdown("""
-                **좋은 요약을 작성하는 방법:**
-                
-                1. **주요 내용 3-5가지**를 인도네시아어로 작성
-                2. **완전한 문장**으로 작성 (주어 + 동사 + 목적어)
-                3. **구체적인 정보** 포함 (숫자, 이름, 장소 등)
-                4. **최소 5문장** 이상 작성
-                
-                **예시:**
-                ```
-                Video ini membahas tentang sistem pendidikan di Amerika Serikat.
-                Guru Indonesia menjelaskan perbedaan antara sekolah di Indonesia dan Amerika.
-                Di Amerika, siswa dapat memilih mata pelajaran yang mereka sukai.
-                Sistem pendidikan di Amerika lebih fleksibel dibandingkan Indonesia.
-                Banyak sekolah di Amerika memiliki fasilitas yang sangat baik.
-                ```
-                """)
-            
-            # 요약 입력 (사용자가 직접 작성)
-            summary_key = f"youtube_user_summary_{video_id}"
-            youtube_summary_input = st.text_area(
-                "📝 영상 내용 요약 (인도네시아어)",
-                height=250,
-                placeholder="""영상을 시청한 후, 들은 내용을 인도네시아어로 요약하세요.
+            st.subheader("3️⃣ 쉬운 글쓰기 + 문법 피드백")
 
-예시:
-Video ini membahas tentang...
-Pembicara menjelaskan bahwa...
-Topik utama adalah...""",
-                key=summary_key,
-                help="최소 50자 이상 작성하세요"
+            st.markdown("**아래 템플릿을 채워서 2~3문장만 작성해보세요.**")
+            st.markdown(
+                """
+**채워 넣기 템플릿**
+1) Video ini tentang ...
+2) Pembicara mengatakan bahwa ...
+3) Hal menarik adalah ...
+"""
             )
-            
-            # 글자 수 표시
-            char_count = len(youtube_summary_input.strip()) if youtube_summary_input else 0
-            
-            if char_count > 0:
-                if char_count >= 50:
-                    st.success(f"✅ 작성 완료: {char_count}자 (최소 50자)")
+
+            writing_key = f"youtube_guided_writing_{video_id}"
+            youtube_writing_input = st.text_area(
+                "✍️ 간단한 문장 작성 (인도네시아어)",
+                height=200,
+                placeholder="예: Video ini tentang kebiasaan sehat di sekolah.",
+                key=writing_key,
+            )
+
+            feedback_key = f"youtube_writing_feedback_{video_id}"
+            feedback_error_key = f"youtube_writing_feedback_error_{video_id}"
+
+            if st.button("✅ 첨삭 받기", width="stretch", key=f"youtube_writing_feedback_submit_{video_id}"):
+                if not youtube_writing_input.strip():
+                    st.warning("먼저 간단한 문장을 작성해주세요.")
                 else:
-                    st.warning(f"⚠️ {char_count}자 / 최소 50자 필요 (아직 {50 - char_count}자 더 필요)")
-            
-            # 퀴즈 생성 버튼 - 요약 작성 바로 아래
+                    try:
+                        transcript_for_feedback = fetched_subtitle[:2000] if fetched_subtitle else ""
+                        prompt = safe_prompt_fill(
+                            YOUTUBE_WRITING_FEEDBACK_PROMPT,
+                            level=level,
+                            transcript=transcript_for_feedback,
+                            user_text=youtube_writing_input.strip(),
+                        )
+                        feedback = llm_json(prompt, model=gen_model)
+                        st.session_state[feedback_key] = feedback
+                        st.session_state.pop(feedback_error_key, None)
+                        st.success("✅ 첨삭 완료!")
+                        st.rerun()
+                    except Exception as e:
+                        st.session_state[feedback_error_key] = str(e)
+                        st.error("❌ 첨삭 실패")
+
+            if feedback_key in st.session_state:
+                feedback = st.session_state.get(feedback_key, {})
+                st.markdown("#### ✅ 교정된 문장")
+                st.success(feedback.get("corrected_text", ""))
+
+                fixes = feedback.get("fixes", [])
+                if fixes:
+                    st.markdown("#### 🔧 주요 수정 포인트")
+                    for fix in fixes:
+                        before = fix.get("before", "")
+                        after = fix.get("after", "")
+                        why_ko = fix.get("why_ko", "")
+                        st.markdown(f"- **전:** {before} → **후:** {after}")
+                        if why_ko:
+                            st.caption(f"이유: {why_ko}")
+
+                overall_comment = feedback.get("overall_comment_ko", "")
+                if overall_comment:
+                    st.markdown("#### 💬 코멘트")
+                    st.info(overall_comment)
+
+                tips = feedback.get("tips_ko", [])
+                if tips:
+                    st.markdown("#### ✅ 다음에 바로 적용할 팁")
+                    for tip in tips:
+                        st.markdown(f"- {tip}")
+
+            # 퀴즈 생성 버튼 - 글쓰기 아래
             st.markdown("---")
-            
-            # 사용자 요약이 있으면 우선 사용, 없으면 자막 사용
-            text_for_quiz = youtube_summary_input.strip() if youtube_summary_input.strip() else fetched_subtitle
+
+            # 자막이 있으면 우선 사용, 없으면 작성문 사용
+            text_for_quiz = fetched_subtitle or youtube_writing_input.strip()
             quiz_char_count = len(text_for_quiz)
             
             if quiz_char_count >= 50:
@@ -3479,8 +3713,8 @@ Topik utama adalah...""",
                 quiz_btn_key = f"btn_generate_youtube_quiz_{video_id}"
                 
                 # 어떤 자료로 퀴즈를 생성하는지 표시
-                if youtube_summary_input.strip():
-                    btn_label = f"🎯 작성한 요약으로 퀴즈 {num_questions}문항 생성"
+                if youtube_writing_input.strip():
+                    btn_label = f"🎯 가져온 영상 자막으로 퀴즈 {num_questions}문항 생성"
                 else:
                     btn_label = f"🎯 가져온 자막으로 퀴즈 {num_questions}문항 생성"
                 
@@ -3532,7 +3766,8 @@ Topik utama adalah...""",
                     QUIZ_PROMPT,
                     num_questions=str(num_questions),
                     transcript=quiz_text,
-                    level=level
+                    level=level,
+                    level_profile=level_profile_prompt(level),
                 )
                 
                 if debug:
@@ -3615,7 +3850,7 @@ Topik utama adalah...""",
                             condition_simple = condition or "B"
                             saved_transcript = st.session_state.get("youtube_transcript", "")
 
-                            st.session_state["youtube_user_answers"] = user_answers
+                            st.session_state["youtube_user_answers"] = _normalize_user_answers(user_answers)
                             
                             prompt = safe_prompt_fill(
                                 COACH_PROMPT,
@@ -3723,6 +3958,7 @@ Topik utama adalah...""",
                     item=item,
                     user_answer=user_ans,
                     wrong_item=wrong_item,
+                    wrong_items_by_id=wrong_items_by_id,
                     key_prefix="youtube",
                     navigate_to_page_fn=navigate_to_page,
                 )
@@ -3946,7 +4182,8 @@ def render_text_page():
                     QUIZ_PROMPT,
                     num_questions=str(num_questions),
                     transcript=quiz_text,
-                    level=level
+                    level=level,
+                    level_profile=level_profile_prompt(level),
                 )
                 
                 if debug:
@@ -4015,7 +4252,7 @@ def render_text_page():
                             condition_simple = condition or "B"
                             saved_text = st.session_state.get("extracted_text", "")
 
-                            st.session_state["text_user_answers"] = user_answers
+                            st.session_state["text_user_answers"] = _normalize_user_answers(user_answers)
                             
                             prompt = safe_prompt_fill(
                                 COACH_PROMPT,
@@ -4119,6 +4356,7 @@ def render_text_page():
                     item=item,
                     user_answer=user_ans,
                     wrong_item=wrong_item,
+                    wrong_items_by_id=wrong_items_by_id,
                     key_prefix="text",
                     navigate_to_page_fn=navigate_to_page,
                 )
@@ -4667,7 +4905,8 @@ def render_results_page():
                         QUIZ_PROMPT,
                         num_questions=str(num_questions),
                         transcript=quiz_text,
-                        level=level
+                        level=level,
+                        level_profile=level_profile_prompt(level),
                     )
              
                     if debug:
