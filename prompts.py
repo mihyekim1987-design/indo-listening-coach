@@ -65,12 +65,12 @@ QUIZ_PROMPT = """역할: 당신은 인도네시아어(Indonesian) 평가 출제�
 입력:
 - [TRANSCRIPT]는 학습용 오디오 또는 텍스트를 받아쓴 인도네시아어 원문입니다.
 - [NUM_QUESTIONS]는 생성할 문제 수입니다.
-- [LEVEL]는 학습 수준입니다 (A1~A2, B1~B2).
-- [LEVEL_PROFILE]은 난이도/문장 길이/어휘/오답 수준 지침입니다.
+- [LEVEL]는 CEFR 학습 수준입니다 (A1, A2, B1, B2).
+- [LEVEL_PROFILE]은 난이도/문장 길이/어휘/오답 수준 지침입니다 (DIFFICULTY_PROFILE 블록 포함).
 
 목표:
 TRANSCRIPT를 바탕으로 {level} 수준의 4지선다 문제 {num_questions}개를 만드세요.
-LEVEL_PROFILE 지침을 반드시 반영하세요.
+DIFFICULTY_PROFILE 지침을 반드시 반영하세요.
 
 필수 규칙:
 - 출력은 반드시 JSON만 반환(추가 설명 금지)
@@ -79,17 +79,20 @@ LEVEL_PROFILE 지침을 반드시 반영하세요.
 - 각 문제는 TRANSCRIPT에서 정답 근거를 찾을 수 있어야 함
 - 오답은 그럴듯하되 TRANSCRIPT와 명확히 불일치해야 함
 - questions는 반드시 {num_questions}개, id는 1~{num_questions}
-- 초급(A1~A2): 쉬운 단어, 짧은 문장, 쉬운 오답
-- 중급(B1~B2): 다양한 어휘, 더 긴 문장, 미묘한 오답
+- 각 문제 type은 literal|vocab|grammar|inference 중 하나
+- DIFFICULTY_PROFILE의 sentence length와 max_subclauses는 question과 choices 모두에 적용
+- DIFFICULTY_PROFILE의 question_type_plan_for_N에 맞춰 type 분포를 맞출 것
+- explanation은 DIFFICULTY_PROFILE의 explanation_depth에 맞춰 분량/깊이를 조절
 
 출력 JSON 스키마:
 {{
   "mode": "BIPA_LISTENING",
   "level": "A1",
+  "difficulty_profile_used": {{"level_label":"string","cefr":"A1","target_sentence_len_words":[4,8],"max_subclauses":0,"vocab_band":"string","distractor_subtlety":1,"explanation_depth":"string","question_type_plan_for_N":{{"literal":2,"vocab":1,"grammar":1,"inference":1}},"grammar_targets":["string"],"ban_list":["string"]}},
   "questions": [
     {{
       "id": 1,
-      "type": "FACT|DETAIL|GIST",
+      "type": "literal|vocab|grammar|inference",
       "question": "string (Indonesian)",
       "choices": {{"A":"string","B":"string","C":"string","D":"string"}},
       "answer": "A|B|C|D",
@@ -363,26 +366,28 @@ Create ONE similar but different question based on the original question below.
 
 Original Question:
 - Question: {question}
-- Category: {category}
+- Choices: {choices_json}
 - Correct Answer: {correct_answer}
 - Evidence Quote: {evidence_quote}
+- Category: {category}
 
 CRITICAL REQUIREMENTS:
 1. Keep the same category and difficulty level
 2. Test the same grammar/vocabulary concept but use different sentences/situations
-3. Question and choices MUST be in Indonesian
-4. evidence_quote MUST be Indonesian ONLY (no Korean characters)
-5. Create a completely new Indonesian sentence for evidence_quote that tests the same concept
+3. Question and choices MUST be Bahasa Indonesia ONLY (no Hangul, no Korean words)
+4. Korean is allowed ONLY in why_correct_ko (required, 1-2 sentences, non-empty)
+5. evidence_quote MUST be Bahasa Indonesia ONLY (no Hangul)
+6. Create a completely new Indonesian sentence for evidence_quote that tests the same concept
 
 RESPOND ONLY in this JSON format (no other text):
 {{
   "id": 99,
-  "question": "Pertanyaan baru (Indonesian only)",
+  "question": "Pertanyaan baru (Bahasa Indonesia only)",
   "category": "{category}",
   "choices": {{"A":"...","B":"...","C":"...","D":"..."}},
   "answer": "A|B|C|D",
-  "evidence_quote": "Kalimat bahasa Indonesia (Indonesian only)",
-  "explanation": "Penjelasan singkat dalam bahasa Indonesia"
+  "evidence_quote": "Kalimat bahasa Indonesia (Bahasa Indonesia only)",
+  "why_correct_ko": "정답 해설 (Korean only, required, 1-2 sentences)"
 }}
 """
 

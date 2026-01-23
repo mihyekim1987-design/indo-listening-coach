@@ -1110,6 +1110,7 @@ class RepeatLearningManager:
             "total_retries": 0,       # 총 시도 횟수
             "active": False,          # 반복 학습 모드 활성화
             "celebration_shown": False,
+            "kind": None,             # wrong | similar
         }
 
     @classmethod
@@ -1137,6 +1138,7 @@ class RepeatLearningManager:
         state["total_retries"] = 0
         state["active"] = True
         state["celebration_shown"] = False
+        state["kind"] = "wrong"
         mode_state["retry_active"] = True
         mode_state["retry_completed"] = False
         mode_state["retry_mastered"] = False
@@ -1163,6 +1165,52 @@ class RepeatLearningManager:
                 "category": item.get("category", "comprehension"),
             }
             
+            state["wrong_queue"].append(question_data)
+            state["retry_count"][q_id] = 0
+
+    @classmethod
+    def start_custom(cls, mode: str, questions: list, kind: str):
+        """제공된 문제 리스트로 반복 학습 시작"""
+        state = cls.init_state(mode)
+        mode_state = get_mode_state(mode)
+
+        # 초기화
+        state["wrong_queue"] = []
+        state["completed"] = []
+        state["retry_count"] = {}
+        state["total_retries"] = 0
+        state["active"] = True
+        state["celebration_shown"] = False
+        state["kind"] = kind
+        mode_state["retry_active"] = True
+        mode_state["retry_completed"] = False
+        mode_state["retry_mastered"] = False
+        mode_state["retry_quiz"] = {"questions": questions}
+
+        seed_items = []
+        for q in questions or []:
+            q_id = str(q.get("id") or "")
+            if not q_id:
+                continue
+            seed_items.append({
+                "id": q_id,
+                "question_id": q_id,
+                "user_answer": "",
+                "correct_answer": q.get("answer", ""),
+                "evidence_quote": q.get("evidence_quote", ""),
+                "category": q.get("category", "comprehension"),
+            })
+
+        init_shadowing_review_bank(mode, seed_items, questions or [])
+
+        for q in questions or []:
+            q_id = str(q.get("id") or "")
+            if not q_id:
+                continue
+            question_data = {
+                **q,
+                "id": q_id,
+            }
             state["wrong_queue"].append(question_data)
             state["retry_count"][q_id] = 0
     
@@ -1618,83 +1666,129 @@ SIMILAR_QUESTION_PROMPT = """You are an Indonesian language education expert.
 
 Create ONE similar but different question based on the original question below.
 
-**Original Question:**
+Original Question:
+- Id: {id}
 - Question: {question}
-- Category: {category}
+- Choices: {choices_json}
 - Correct Answer: {correct_answer}
 - Evidence Quote: {evidence_quote}
+- Category: {category}
 
-**CRITICAL REQUIREMENTS:**
+CRITICAL REQUIREMENTS:
 1. Keep the same category ({category}) and difficulty level
 2. Test the same grammar/vocabulary concept but use different sentences/situations
-3. **Question and choices MUST be in Korean (한국어)**
-4. **evidence_quote MUST be in Indonesian language ONLY** - NEVER use Korean in evidence_quote
-5. The Indonesian sentence must be natural and grammatically correct
-6. Create a completely new Indonesian sentence for evidence_quote that tests the same concept
+3. Question and choices MUST be Bahasa Indonesia ONLY (no Hangul, no Korean words)
+4. Korean is allowed ONLY in why_correct_ko (required, 1-2 sentences, non-empty)
+5. evidence_quote MUST be Bahasa Indonesia ONLY (no Hangul)
+6. The Indonesian sentence must be natural and grammatically correct
+7. Create a completely new Indonesian sentence for evidence_quote that tests the same concept
 
-**RESPOND ONLY in this JSON format (no other text):**
-{{
+RESPOND ONLY in this JSON format (no other text):
+{
     "id": 99,
-    "question": "새로운 문제 (Korean only)",
+    "question": "Pertanyaan baru (Bahasa Indonesia only)",
     "category": "{category}",
-    "choices": {{
-        "A": "선택지 A (Korean only)",
-        "B": "선택지 B (Korean only)",
-        "C": "선택지 C (Korean only)",
-        "D": "선택지 D (Korean only)"
-    }},
+    "choices": {
+        "A": "Pilihan A (Bahasa Indonesia only)",
+        "B": "Pilihan B (Bahasa Indonesia only)",
+        "C": "Pilihan C (Bahasa Indonesia only)",
+        "D": "Pilihan D (Bahasa Indonesia only)"
+    },
     "answer": "A or B or C or D",
-    "evidence_quote": "NEW Indonesian sentence here (Indonesian ONLY - NO Korean characters)",
-    "explanation": "정답 해설 (Korean only)"
-}}
-
-**CORRECT Example:**
-{{
-    "id": 99,
-    "question": "다음 인도네시아어 문장에서 'pasar'의 의미는?",
-    "category": "vocabulary",
-    "choices": {{
-        "A": "학교",
-        "B": "집",
-        "C": "시장",
-        "D": "병원"
-    }},
-    "answer": "C",
-    "evidence_quote": "Saya pergi ke pasar untuk membeli sayuran segar setiap pagi.",
-    "explanation": "pasar는 시장을 의미하며, 일상생활에서 자주 사용되는 단어입니다."
-}}
-
-**WRONG Example (DO NOT DO THIS):**
-{{
-    "evidence_quote": "저는 시장에 갑니다"  <- WRONG! This is Korean, not Indonesian!
-}}
-
-Remember: evidence_quote must ONLY contain Indonesian language characters and words!
+    "evidence_quote": "Kalimat baru bahasa Indonesia (Bahasa Indonesia only)",
+    "why_correct_ko": "정답 해설 (Korean only, required, 1-2 sentences)"
+}
 """
+
+HANGUL_RE = re.compile(r"[가-힣]")
+
+def _contains_hangul(text: str) -> bool:
+    return bool(HANGUL_RE.search(text or ""))
+
+def _has_hangul_in_question_or_choices(payload: dict) -> bool:
+    question = payload.get("question", "")
+    if _contains_hangul(question):
+        return True
+    choices = payload.get("choices", {})
+    if isinstance(choices, dict):
+        for choice in choices.values():
+            if _contains_hangul(str(choice)):
+                return True
+    return False
 
 def generate_similar_question(original_question: dict, model: str = "gpt-4o-mini") -> Optional[dict]:
     """원본 문제와 유사한 새 문제 생성"""
     
     category, _ = WeaknessAnalyzer.categorize_question(original_question)
-    cat_info = CEFR_CATEGORIES.get(category, {})
-    
+    raw_choices = original_question.get("choices", {}) or {}
+    clean_choices = {}
+    if isinstance(raw_choices, dict):
+        for key, value in raw_choices.items():
+            clean_choices[key] = "" if _contains_hangul(str(value)) else value
+
+    source = {
+        "id": original_question.get("id"),
+        "question": "" if _contains_hangul(original_question.get("question", "")) else original_question.get("question", ""),
+        "choices": clean_choices,
+        "answer": original_question.get("answer", ""),
+        "evidence_quote": "" if _contains_hangul(original_question.get("evidence_quote", "")) else original_question.get("evidence_quote", ""),
+    }
+
     prompt = safe_prompt_fill(
         SIMILAR_QUESTION_PROMPT,
-        question=original_question.get("question", ""),
-        category=f"{cat_info.get('name', category)} ({category})",
-        correct_answer=original_question.get("answer", ""),
-        evidence_quote=original_question.get("evidence_quote", "원문 없음"),
+        id=source.get("id", ""),
+        question=source.get("question", ""),
+        choices_json=json.dumps(source.get("choices", {}), ensure_ascii=True),
+        category=category,
+        correct_answer=source.get("answer", ""),
+        evidence_quote=source.get("evidence_quote", ""),
     )
     
     try:
         result = llm_json(prompt, model=model)
+        if _has_hangul_in_question_or_choices(result):
+            strict_prompt = (
+                prompt
+                + "\n\nSTRICT OVERRIDE: The JSON must contain NO Hangul in question/choices. "
+                  "If any Hangul appears in question/choices, regenerate in Bahasa Indonesia only."
+            )
+            result = llm_json(strict_prompt, model=model)
+            if _has_hangul_in_question_or_choices(result):
+                return None
         result["is_similar"] = True
         result["original_id"] = original_question.get("id")
         result["category"] = category
+        result["why_correct_ko"] = get_explanation_ko(result)
         return result
     except Exception as e:
         st.error(f"유사 문제 생성 실패: {e}")
         return None
+
+
+def build_similar_repeat_seed_questions(mode: str, questions: list, model: str) -> list:
+    seed_questions = []
+    if not questions:
+        return seed_questions
+
+    used_ids = {str(q.get("id")) for q in questions if q.get("id") is not None}
+
+    for idx, q in enumerate(questions, 1):
+        similar = generate_similar_question(q, model=model)
+        base = dict(similar) if similar else dict(q)
+        original_id = str(q.get("id"))
+        base["original_id"] = original_id
+        base["is_similar"] = True
+
+        suffix = 1
+        candidate = f"{original_id}_s{suffix}"
+        while candidate in used_ids:
+            suffix += 1
+            candidate = f"{original_id}_s{suffix}"
+        base["id"] = candidate
+        used_ids.add(candidate)
+        seed_questions.append(base)
+
+    return seed_questions
 
 
 # =====================================================
@@ -2077,9 +2171,11 @@ def render_repeat_learning_ui(mode: str, key_prefix: str = ""):
                 st.error(f"❌ 오답입니다. 정답: {result['correct_answer']}")
                 
                 # 해설 표시
-                why_correct = current_q.get("why_correct_ko", "")
+                why_correct = get_explanation_ko(current_q)
                 if why_correct:
                     st.info(f"💡 **해설:** {why_correct}")
+                else:
+                    st.caption("해설이 제공되지 않았습니다")
                 
                 evidence = current_q.get("evidence_quote", "")
                 if evidence:
@@ -2091,6 +2187,10 @@ def render_repeat_learning_ui(mode: str, key_prefix: str = ""):
         with st.spinner("유사 문제 생성 중..."):
             model_name = st.session_state.get("gen_model", "gpt-4o-mini")
             similar = generate_similar_question(current_q, model=model_name)
+            if similar is None:
+                similar = dict(current_q)
+                similar["is_similar"] = True
+                similar["original_id"] = current_q.get("original_id", current_q.get("id"))
             if similar:
                 RepeatLearningManager.replace_with_similar(mode, similar)
                 st.success("✅ 유사 문제가 생성되었습니다!")
@@ -2367,6 +2467,34 @@ def _first_sentence(text: str) -> str:
     return cleaned
 
 
+def get_explanation_ko(q: dict) -> str:
+    if not isinstance(q, dict):
+        return ""
+    for key in ["why_correct_ko", "explanation_ko", "why_correct", "explanation", "rationale_ko"]:
+        value = q.get(key, "")
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                return text
+    evidence = (q.get("evidence_quote") or "").strip()
+    answer = (q.get("answer") or "").strip()
+    choices = q.get("choices") or {}
+    choice_text = ""
+    if answer and isinstance(choices, dict):
+        choice_text = str(choices.get(answer, "")).strip()
+    if evidence:
+        if answer and choice_text:
+            return f"근거 문장(\"{evidence}\")의 의미상 정답은 {answer}({choice_text})입니다."
+        if answer:
+            return f"근거 문장(\"{evidence}\")의 의미상 정답은 {answer}입니다."
+        return f"근거 문장(\"{evidence}\")을 근거로 정답을 판단하세요."
+    if answer and choice_text:
+        return f"정답은 {answer}({choice_text})입니다."
+    if answer:
+        return f"정답은 {answer}입니다."
+    return ""
+
+
 def is_debug_mode() -> bool:
     if st.session_state.get("debug_mode_enabled"):
         return True
@@ -2393,6 +2521,46 @@ def _normalize_user_answers(m: dict) -> dict:
     if not isinstance(m, dict):
         return {}
     return {str(k): _normalize_answer(v) for k, v in m.items() if v is not None}
+
+
+def compute_wrong_items(questions: list, user_answers: dict) -> tuple:
+    wrong_items = []
+    wrong_items_by_id = {}
+    if not questions or not isinstance(user_answers, dict):
+        return wrong_items, wrong_items_by_id
+
+    for q in questions:
+        q_id = str(q.get("id") or "").strip()
+        if not q_id:
+            continue
+        correct_raw = q.get("answer", "")
+        correct_norm = _normalize_answer(correct_raw)
+        user_raw = user_answers.get(q_id, "")
+        user_norm = _normalize_answer(user_raw)
+        if not correct_norm:
+            continue
+        if user_norm != correct_norm:
+            item = {
+                "id": q_id,
+                "question_id": q_id,
+                "user_answer": user_raw,
+                "correct_answer": correct_raw,
+            }
+            wrong_items.append(item)
+            wrong_items_by_id[q_id] = item
+
+    return wrong_items, wrong_items_by_id
+
+
+def merge_wrong_items_for_repeat(coach_wrong_items: list, computed_wrong_items: list) -> list:
+    if not computed_wrong_items:
+        return []
+    coach_by_id = {str(item.get("id")): item for item in coach_wrong_items or []}
+    merged = []
+    for item in computed_wrong_items:
+        q_id = str(item.get("id"))
+        merged.append({**coach_by_id.get(q_id, {}), **item})
+    return merged
 
 
 def render_debug_line(
@@ -2768,28 +2936,91 @@ if "today_condition_note" not in st.session_state:
 if "learning_mode" not in st.session_state:
     st.session_state["learning_mode"] = None
 
+LEVEL_OPTIONS = ["A1 (입문)", "A2 (초급)", "B1 (중급)", "B2 (중상급)"]
+DIFFICULTY_PROFILE = {
+    "A1 (입문)": {
+        "cefr": "A1",
+        "desc_ko": "기본 인사, 자기소개",
+        "target_sentence_len_words": [4, 8],
+        "max_subclauses": 0,
+        "allowed_connectors": ["dan", "atau", "tapi"],
+        "vocab_band": "top_1000_common",
+        "distractor_subtlety": 1,
+        "explanation_depth": "very short and simple (1 short sentence)",
+        "question_type_mix": {"literal": 0.70, "vocab": 0.20, "grammar": 0.10, "inference": 0.00},
+        "grammar_targets": [
+            "pronouns (saya/kamu/dia)",
+            "simple nominal sentences",
+            "basic negation (tidak/bukan)",
+            "simple questions (apa/siapa/di mana)",
+        ],
+        "ban_list": ["relative clauses yang", "passive voice di-", "complex modality", "abstract nouns"],
+    },
+    "A2 (초급)": {
+        "cefr": "A2",
+        "desc_ko": "일상 대화, 기본 문법",
+        "target_sentence_len_words": [7, 12],
+        "max_subclauses": 1,
+        "allowed_connectors": ["dan", "atau", "tapi", "karena", "lalu"],
+        "vocab_band": "top_2000_common",
+        "distractor_subtlety": 2,
+        "explanation_depth": "short and simple (1-2 short sentences)",
+        "question_type_mix": {"literal": 0.55, "vocab": 0.20, "grammar": 0.15, "inference": 0.10},
+        "grammar_targets": [
+            "simple past markers (sudah/pernah)",
+            "future markers (akan/mau)",
+            "prepositions (di/ke/dari)",
+            "basic affixes (ber-, meN-) in common verbs",
+        ],
+        "ban_list": ["dense academic style", "multi-step inference > 1 hop"],
+    },
+    "B1 (중급)": {
+        "cefr": "B1",
+        "desc_ko": "의견 표현, 복잡한 문법",
+        "target_sentence_len_words": [11, 18],
+        "max_subclauses": 2,
+        "allowed_connectors": ["karena", "tetapi", "sehingga", "walaupun", "jika", "agar"],
+        "vocab_band": "mid_frequency_and_topic_vocab",
+        "distractor_subtlety": 3,
+        "explanation_depth": "moderate detail (1-2 sentences)",
+        "question_type_mix": {"literal": 0.40, "vocab": 0.20, "grammar": 0.20, "inference": 0.20},
+        "grammar_targets": [
+            "complex negation nuance",
+            "relative clauses with yang (simple)",
+            "reported speech (kata/bilang) basic",
+            "modality (harus/bisa/sebaiknya)",
+        ],
+        "ban_list": ["highly technical jargon without context"],
+    },
+    "B2 (중상급)": {
+        "cefr": "B2",
+        "desc_ko": "추상적 주제, 고급 문법",
+        "target_sentence_len_words": [16, 26],
+        "max_subclauses": 3,
+        "allowed_connectors": ["meskipun", "namun", "sebaliknya", "oleh karena itu", "selain itu"],
+        "vocab_band": "advanced_and_abstract_vocab",
+        "distractor_subtlety": 4,
+        "explanation_depth": "deeper reasoning with nuance (2 sentences)",
+        "question_type_mix": {"literal": 0.25, "vocab": 0.20, "grammar": 0.20, "inference": 0.35},
+        "grammar_targets": [
+            "passive voice (di-) and causative (meN-kan) when appropriate",
+            "nominalization and abstract nouns",
+            "contrastive discourse markers",
+            "paraphrase and implication",
+        ],
+        "ban_list": [],
+    },
+}
+
+DEFAULT_LEVEL = "A2 (초급)"
+LEGACY_MODE_TO_LEVEL = {
+    "BIPA (초급)": "A2 (초급)",
+    "BIPA (중급)": "B1 (중급)",
+}
+
 CONDITION_TO_QUESTIONS = {"A": 10, "B": 5, "C": 3}
 CONDITION_LABELS = {"A": "A (여유)", "B": "B (보통)", "C": "C (힘듦)"}
-MODE_TO_LEVEL = {
-    "BIPA (초급)": "초급 (A1~A2)",
-    "BIPA (중급)": "중급 (B1~B2)",
-}
-LEVEL_PROFILE = {
-    "초급 (A1~A2)": {
-        "difficulty": "easy",
-        "sentence_len": "short",
-        "vocab": "basic",
-        "distractors": "obvious",
-    },
-    "중급 (B1~B2)": {
-        "difficulty": "medium",
-        "sentence_len": "medium",
-        "vocab": "intermediate",
-        "distractors": "subtle",
-    },
-}
 DEFAULT_NUM_QUESTIONS = 5
-DEFAULT_LEVEL = "초급 (A1~A2)"
 LEGACY_CONDITION_TO_CODE = {label: code for code, label in CONDITION_LABELS.items()}
 
 if st.session_state.get("today_condition") in LEGACY_CONDITION_TO_CODE:
@@ -2797,40 +3028,239 @@ if st.session_state.get("today_condition") in LEGACY_CONDITION_TO_CODE:
         st.session_state.get("today_condition")
     ]
 
+if "learning_level" not in st.session_state:
+    legacy_mode = st.session_state.get("learning_mode")
+    if legacy_mode in LEGACY_MODE_TO_LEVEL:
+        st.session_state["learning_level"] = LEGACY_MODE_TO_LEVEL[legacy_mode]
+    elif legacy_mode in LEVEL_OPTIONS:
+        st.session_state["learning_level"] = legacy_mode
+    else:
+        st.session_state["learning_level"] = DEFAULT_LEVEL
+if st.session_state.get("learning_level") not in LEVEL_OPTIONS:
+    st.session_state["learning_level"] = DEFAULT_LEVEL
+st.session_state["learning_mode"] = st.session_state.get("learning_level")
+
 
 def get_learning_settings_state() -> dict:
     condition_code = st.session_state.get("today_condition")
-    learning_mode = st.session_state.get("learning_mode")
+    learning_level = st.session_state.get("learning_level")
     effective_condition = condition_code or "B"
     num_questions = CONDITION_TO_QUESTIONS.get(effective_condition, DEFAULT_NUM_QUESTIONS)
-    if learning_mode:
-        level = MODE_TO_LEVEL.get(learning_mode, DEFAULT_LEVEL)
-    else:
-        level = DEFAULT_LEVEL
+    level = learning_level if learning_level in LEVEL_OPTIONS else DEFAULT_LEVEL
+    st.session_state["learning_mode"] = level
     return {
         "condition": condition_code,
-        "learning_mode": learning_mode,
+        "learning_level": learning_level,
         "num_questions": num_questions,
         "level": level,
         "condition_simple": effective_condition,
     }
 
 
-def level_profile_prompt(level: str) -> str:
-    profile = LEVEL_PROFILE.get(level, LEVEL_PROFILE[DEFAULT_LEVEL])
-    return (
-        f"- difficulty: {profile['difficulty']}\n"
-        f"- sentence_length: {profile['sentence_len']}\n"
-        f"- vocabulary: {profile['vocab']}\n"
-        f"- distractors: {profile['distractors']}\n"
-        "Apply these constraints consistently across questions and options."
+SUBCLAUSE_MARKERS = [
+    "yang",
+    "ketika",
+    "walaupun",
+    "meskipun",
+    "karena",
+    "sehingga",
+    "agar",
+    "jika",
+    "lalu",
+    "tapi",
+    "tetapi",
+    "namun",
+    "sementara",
+    "sebaliknya",
+    "oleh karena itu",
+    "selain itu",
+]
+QUESTION_TYPE_ORDER = ["literal", "vocab", "grammar", "inference"]
+
+
+def get_difficulty_profile(level: str) -> dict:
+    return DIFFICULTY_PROFILE.get(level, DIFFICULTY_PROFILE[DEFAULT_LEVEL])
+
+
+def compute_word_count(text: str) -> int:
+    if not text:
+        return 0
+    return len(re.findall(r"\b[\w'-]+\b", text))
+
+
+def detect_subclause_count(text: str) -> int:
+    if not text:
+        return 0
+    lowered = re.sub(r"\s+", " ", text.lower()).strip()
+    count = 0
+    for marker in SUBCLAUSE_MARKERS:
+        pattern = r"\b" + re.escape(marker) + r"\b"
+        count += len(re.findall(pattern, lowered))
+    return count
+
+
+def build_question_type_plan(profile: dict, num_questions: int) -> dict:
+    mix = profile.get("question_type_mix", {})
+    raw = {k: (mix.get(k, 0) * num_questions) for k in QUESTION_TYPE_ORDER}
+    plan = {k: int(raw[k]) for k in QUESTION_TYPE_ORDER}
+    remaining = max(num_questions - sum(plan.values()), 0)
+    remainders = sorted(
+        QUESTION_TYPE_ORDER,
+        key=lambda k: (- (raw[k] - plan[k]), QUESTION_TYPE_ORDER.index(k)),
     )
+    for k in remainders:
+        if remaining <= 0:
+            break
+        plan[k] += 1
+        remaining -= 1
+    return plan
+
+
+def difficulty_profile_prompt(level: str, num_questions: int) -> str:
+    profile = get_difficulty_profile(level)
+    plan = build_question_type_plan(profile, num_questions)
+    plan_str = ", ".join([f"{k}={plan[k]}" for k in QUESTION_TYPE_ORDER])
+    return (
+        "DIFFICULTY_PROFILE:\n"
+        f"  level: {profile['cefr']}\n"
+        f"  target_sentence_len_words: {profile['target_sentence_len_words'][0]}-{profile['target_sentence_len_words'][1]}\n"
+        f"  max_subclauses: {profile['max_subclauses']}\n"
+        f"  vocab_band: {profile['vocab_band']}\n"
+        f"  distractor_subtlety: {profile['distractor_subtlety']}/5\n"
+        f"  explanation_depth: {profile['explanation_depth']}\n"
+        f"  question_type_plan_for_N={num_questions}: {plan_str}\n"
+        f"  grammar_targets: {profile['grammar_targets']}\n"
+        f"  ban_list: {profile['ban_list']}\n"
+    )
+
+
+def build_difficulty_profile_used(level: str, num_questions: int) -> dict:
+    profile = get_difficulty_profile(level)
+    plan = build_question_type_plan(profile, num_questions)
+    return {
+        "level_label": level,
+        "cefr": profile["cefr"],
+        "target_sentence_len_words": profile["target_sentence_len_words"],
+        "max_subclauses": profile["max_subclauses"],
+        "vocab_band": profile["vocab_band"],
+        "distractor_subtlety": profile["distractor_subtlety"],
+        "explanation_depth": profile["explanation_depth"],
+        "question_type_plan_for_N": plan,
+        "grammar_targets": profile["grammar_targets"],
+        "ban_list": profile["ban_list"],
+    }
+
+
+def normalize_quiz_difficulty(quiz: dict, level: str, num_questions: int) -> dict:
+    profile = get_difficulty_profile(level)
+    plan = build_question_type_plan(profile, num_questions)
+    issues = []
+    if not isinstance(quiz, dict):
+        return {"issues": ["quiz_not_dict"], "plan": plan}
+
+    quiz["level"] = profile["cefr"]
+    quiz.setdefault("difficulty_profile_used", build_difficulty_profile_used(level, num_questions))
+
+    questions = quiz.get("questions", [])
+    type_counts = {k: 0 for k in QUESTION_TYPE_ORDER}
+    word_range = profile["target_sentence_len_words"]
+    max_subclauses = profile["max_subclauses"]
+    word_violations = 0
+    subclause_violations = 0
+
+    for q in questions:
+        q_type = str(q.get("type", "")).strip().lower()
+        if q_type not in QUESTION_TYPE_ORDER:
+            q_type = "literal"
+            issues.append("invalid_question_type")
+        q["type"] = q_type
+        type_counts[q_type] += 1
+
+        question_text = q.get("question", "")
+        if question_text:
+            wc = compute_word_count(question_text)
+            if wc < word_range[0] or wc > word_range[1]:
+                word_violations += 1
+            if detect_subclause_count(question_text) > max_subclauses:
+                subclause_violations += 1
+
+        choices = q.get("choices", {}) or {}
+        for choice_text in choices.values():
+            wc = compute_word_count(choice_text)
+            if wc < word_range[0] or wc > word_range[1]:
+                word_violations += 1
+            if detect_subclause_count(choice_text) > max_subclauses:
+                subclause_violations += 1
+
+    for q_type, expected in plan.items():
+        if abs(type_counts.get(q_type, 0) - expected) > 1:
+            issues.append("type_mix_off")
+            break
+
+    if word_violations > 0:
+        issues.append("sentence_length_off")
+    if subclause_violations > 0:
+        issues.append("subclause_count_off")
+
+    return {
+        "issues": issues,
+        "plan": plan,
+        "type_counts": type_counts,
+        "word_violations": word_violations,
+        "subclause_violations": subclause_violations,
+    }
+
+
+def build_quiz_prompt(transcript: str, num_questions: int, level: str) -> str:
+    profile = get_difficulty_profile(level)
+    return safe_prompt_fill(
+        QUIZ_PROMPT,
+        num_questions=str(num_questions),
+        transcript=transcript,
+        level=profile["cefr"],
+        level_profile=difficulty_profile_prompt(level, num_questions),
+    )
+
+
+def render_difficulty_warnings(check: dict, level: str, num_questions: int):
+    if not check.get("issues"):
+        return
+    profile = get_difficulty_profile(level)
+    plan = build_question_type_plan(profile, num_questions)
+    st.warning(
+        "난이도 체크 경고: "
+        f"issues={check.get('issues')}, "
+        f"type_counts={check.get('type_counts')}, "
+        f"expected_plan={plan}, "
+        f"word_violations={check.get('word_violations')}, "
+        f"subclause_violations={check.get('subclause_violations')}"
+    )
+
+
+def generate_quiz_with_checks(transcript: str, num_questions: int, level: str, model: str, debug: bool):
+    prompt = build_quiz_prompt(transcript, num_questions, level)
+    quiz = llm_json(prompt, model=model)
+    check = normalize_quiz_difficulty(quiz, level, num_questions)
+    if check.get("issues"):
+        retry_prompt = (
+            prompt
+            + "\n\nSTRICT_RETRY: You MUST follow DIFFICULTY_PROFILE exactly. "
+            "Enforce sentence length and max_subclauses for each question and choice, "
+            "and match the question_type_plan_for_N."
+        )
+        quiz = llm_json(retry_prompt, model=model)
+        check = normalize_quiz_difficulty(quiz, level, num_questions)
+        if debug:
+            render_difficulty_warnings(check, level, num_questions)
+    elif debug:
+        render_difficulty_warnings(check, level, num_questions)
+    return quiz, prompt
 
 
 def render_learning_top_controls(mode: str, navigate_to_page_fn, key_prefix: str):
     settings = get_learning_settings_state()
     condition = settings["condition"]
-    learning_mode = settings["learning_mode"]
+    learning_level = settings["learning_level"]
     num_questions = settings["num_questions"]
     level = settings["level"]
 
@@ -2869,28 +3299,30 @@ def render_learning_top_controls(mode: str, navigate_to_page_fn, key_prefix: str
             st.rerun()
 
     def render_settings_controls():
-        tmp_mode = f"{key_prefix}_tmp_learning_mode"
-        if tmp_mode not in st.session_state:
-            st.session_state[tmp_mode] = st.session_state.get("learning_mode")
+        tmp_level = f"{key_prefix}_tmp_learning_level"
+        if tmp_level not in st.session_state:
+            st.session_state[tmp_level] = st.session_state.get("learning_level")
         st.selectbox(
-            "학습 모드",
-            ["BIPA (초급)", "BIPA (중급)"],
+            "학습 레벨",
+            LEVEL_OPTIONS,
             index=None,
-            placeholder="학습 모드를 선택하세요",
-            key=tmp_mode,
+            placeholder="학습 레벨을 선택하세요",
+            key=tmp_level,
         )
-        current_mode = st.session_state.get(tmp_mode)
-        if current_mode:
-            current_level = MODE_TO_LEVEL.get(current_mode, DEFAULT_LEVEL)
-            st.caption(f"📘 현재 레벨: **{current_level}**")
+        current_level = st.session_state.get(tmp_level)
+        if current_level:
+            profile = get_difficulty_profile(current_level)
+            st.caption(f"현재 레벨: {current_level} — {profile['desc_ko']}")
         else:
-            st.caption("⚠️ 학습 모드를 선택하지 않았습니다 (기본: 초급)")
+            profile = get_difficulty_profile(DEFAULT_LEVEL)
+            st.caption(f"⚠️ 학습 레벨을 선택하지 않았습니다 (기본: {DEFAULT_LEVEL} — {profile['desc_ko']})")
 
     def render_settings_actions():
-        tmp_mode = f"{key_prefix}_tmp_learning_mode"
+        tmp_level = f"{key_prefix}_tmp_learning_level"
         if st.button("✅ 적용", type="primary", width="stretch", key=f"{key_prefix}_mode_apply"):
-            st.session_state["learning_mode"] = st.session_state.get(tmp_mode)
-            st.session_state.pop(tmp_mode, None)
+            st.session_state["learning_level"] = st.session_state.get(tmp_level)
+            st.session_state["learning_mode"] = st.session_state.get("learning_level")
+            st.session_state.pop(tmp_level, None)
             st.rerun()
 
     col1, col2 = st.columns(2)
@@ -2930,12 +3362,12 @@ def render_learning_top_controls(mode: str, navigate_to_page_fn, key_prefix: str
             render_settings_controls()
             render_settings_actions()
 
-    if condition or learning_mode:
+    if condition or learning_level:
         status_bits = []
         if condition:
             status_bits.append(f"오늘의 컨디션: {CONDITION_LABELS.get(condition, condition)}")
-        if learning_mode:
-            status_bits.append(f"설정: {learning_mode} · {num_questions}문제 · {level}")
+        if learning_level:
+            status_bits.append(f"설정: {learning_level} · {num_questions}문제")
         st.caption(" | ".join(status_bits))
 
 # 디버그 모드 변수 (전역에서 사용 가능하도록)
@@ -3087,7 +3519,8 @@ def render_home_page():
 
 def render_audio_page():
     """오디오 학습 페이지 렌더링"""
-    
+    gen_model = st.session_state.get("gen_model", "gpt-4o-mini")
+
     st.header("🎵 오디오로 학습하기")
     st.markdown("WAV 파일을 업로드하면 음성을 텍스트로 변환하고 퀴즈를 생성합니다.")
 
@@ -3145,6 +3578,7 @@ def render_audio_page():
                     st.session_state.pop("audio_quiz", None)
                     st.session_state.pop("audio_coach", None)
                     reset_mode_ephemeral("audio")
+                    RepeatLearningManager.reset("audio")
                 
                 dt = time.perf_counter() - t0
                 st.success(f"✅ 변환 완료! ({dt:.1f}초 소요)")
@@ -3183,21 +3617,18 @@ def render_audio_page():
         if audio_transcript:
             try:
                 quiz_text = audio_transcript[:4000] if len(audio_transcript) > 4000 else audio_transcript
-                prompt = safe_prompt_fill(
-                    QUIZ_PROMPT,
-                    num_questions=str(num_questions),
-                    transcript=quiz_text,
-                    level=level,
-                    level_profile=level_profile_prompt(level),
-                )
+                with st.spinner("퀴즈를 생성 중... (약 10초 소요)"):
+                    quiz, prompt = generate_quiz_with_checks(
+                        quiz_text,
+                        num_questions,
+                        level,
+                        gen_model,
+                        debug,
+                    )
 
-                
                 if debug:
                     with st.expander("🔍 DEBUG: QUIZ_PROMPT"):
                         st.code(prompt[:1000])
-                
-                with st.spinner("퀴즈를 생성 중... (약 10초 소요)"):
-                    quiz = llm_json(prompt, model=gen_model)
                 
                 st.session_state["audio_quiz"] = quiz
                 st.session_state.pop("audio_coach", None)
@@ -3267,7 +3698,7 @@ def render_audio_page():
                                 condition=condition_simple,
                             )
                             
-                            with st.spinner("채점 중... (Structured Outputs 사용)"):
+                            with st.spinner("채점 중..."):
                                 # Structured Outputs 사용
                                 coach = llm_structured(prompt, CoachResponse, model=gen_model)
                                 coach = sanitize_coach_structured(coach, audio_quiz, user_answers)
@@ -3349,6 +3780,9 @@ def render_audio_page():
             wrong_items_by_id = {str(item.get("id")): item for item in wrong_items}
             items_by_id = {str(item.get("id")): item for item in audio_coach.get("items", [])}
             user_answers = st.session_state.get("audio_user_answers", {})
+            computed_wrong_items, _ = compute_wrong_items(questions, user_answers)
+            wrong_items_for_repeat = merge_wrong_items_for_repeat(wrong_items, computed_wrong_items)
+            all_correct = len(computed_wrong_items) == 0
 
             for q in questions:
                 qid = str(q.get("id"))
@@ -3387,7 +3821,7 @@ def render_audio_page():
                 st.markdown(f"→ _{s.get('ko', '')}_")
                 st.markdown("")
             
-            # AI 학습 코치 및 반복 학습 (오답이 있을 때만 표시)
+            # AI 학습 코치 (코치 결과 기반)
             if wrong_items and len(wrong_items) > 0:
                 st.divider()
                 render_ai_learning_coach(
@@ -3396,21 +3830,31 @@ def render_audio_page():
                     condition=condition,
                     key_prefix="audio"
                 )
-                
-                st.divider()
-                
-                # 반복 학습이 이미 진행 중인지 확인
-                repeat_progress = RepeatLearningManager.get_progress("audio")
-                
-                if not repeat_progress["active"]:
-                    # 반복 학습 시작 버튼
-                    st.markdown("#### 🔄 반복 학습")
-                    st.info(f"💡 틀린 문제 {len(wrong_items)}개를 모두 맞출 때까지 반복 학습할 수 있습니다!")
+            
+            st.divider()
+            
+            # 반복 학습이 이미 진행 중인지 확인
+            repeat_progress = RepeatLearningManager.get_progress("audio")
+
+            if is_debug_mode():
+                st.caption(
+                    f"[debug] mode=audio all_correct={all_correct} "
+                    f"wrong_count={len(computed_wrong_items)} "
+                    f"repeat_active={repeat_progress['active']}"
+                )
+
+            st.markdown("#### 🔄 반복 학습")
+            
+            if repeat_progress["active"]:
+                render_repeat_learning_ui("audio", key_prefix="audio")
+            else:
+                if not all_correct:
+                    st.info(f"💡 틀린 문제 {len(computed_wrong_items)}개를 모두 맞출 때까지 반복 학습할 수 있습니다!")
                     
                     if st.button("🚀 틀린 문제 반복 학습 시작", type="primary", width="stretch", key="audio_start_repeat"):
                         # 취약점 분석 추가
                         analyzed_wrong = []
-                        for item in wrong_items:
+                        for item in wrong_items_for_repeat:
                             q_id = str(item.get("id"))
                             orig_q = next((q for q in questions if str(q.get("id")) == q_id), {})
                             analyzed = WeaknessAnalyzer.analyze_wrong_answer(
@@ -3427,7 +3871,7 @@ def render_audio_page():
                         st.rerun()
                     entry_payload, entry_q_id = build_repeat_entry_shadowing_payload(
                         "audio",
-                        wrong_items,
+                        wrong_items_for_repeat,
                         questions,
                     )
                     if entry_payload and st.button(
@@ -3444,20 +3888,26 @@ def render_audio_page():
                         st.session_state["force_review_tab"] = True
                         set_shadowing_payload_and_go(entry_payload, navigate_to_page)
                 else:
-                    # 반복 학습 UI 표시
-                    render_repeat_learning_ui("audio", key_prefix="audio")
-                
-                # 학습 결과 페이지로 이동 버튼
-                st.divider()
-                if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="audio_goto_results"):
-                    navigate_to_page("results")
-            else:
-                st.divider()
-                st.success("🎉 모든 문제를 맞혔습니다! 완벽해요!")
-                
-                # 학습 결과 페이지로 이동 버튼
-                if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="audio_goto_results_perfect"):
-                    navigate_to_page("results")
+                    st.success("🎉 모든 문제 정답입니다! 이제 유사 문제로 한 번 더 다져볼까요?")
+                    if st.button(
+                        "🔄 유사 문제로 반복 학습 시작",
+                        type="primary",
+                        width="stretch",
+                        key="audio_start_similar_repeat",
+                    ):
+                        with st.spinner("유사 문제를 생성 중..."):
+                            similar_questions = build_similar_repeat_seed_questions(
+                                "audio",
+                                questions,
+                                model=gen_model,
+                            )
+                        RepeatLearningManager.start_custom("audio", similar_questions, kind="similar")
+                        st.rerun()
+            
+            # 학습 결과 페이지로 이동 버튼
+            st.divider()
+            if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="audio_goto_results"):
+                navigate_to_page("results")
 
     # ✅ 페이지 하단 중앙 홈 버튼
     render_home_button_bottom(key="home_from_audio_bottom")
@@ -3466,7 +3916,8 @@ def render_audio_page():
 
 def render_youtube_page():
     """YouTube 학습 페이지 렌더링"""
-    
+    gen_model = st.session_state.get("gen_model", "gpt-4o-mini")
+
     st.header("📺 YouTube로 학습하기")
     st.markdown("YouTube 영상을 시청하고 인도네시아어 요약을 작성한 후 퀴즈를 풀어보세요!")
     
@@ -3728,6 +4179,7 @@ def render_youtube_page():
                     st.session_state.pop("youtube_quiz", None)
                     st.session_state.pop("youtube_coach", None)
                     reset_mode_ephemeral("video")
+                    RepeatLearningManager.reset("video")
                     st.rerun()
             else:
                 quiz_btn_disabled_key = f"btn_generate_youtube_quiz_disabled_{video_id}"
@@ -3762,20 +4214,18 @@ def render_youtube_page():
             
             try:
                 quiz_text = saved_transcript[:4000] if len(saved_transcript) > 4000 else saved_transcript
-                prompt = safe_prompt_fill(
-                    QUIZ_PROMPT,
-                    num_questions=str(num_questions),
-                    transcript=quiz_text,
-                    level=level,
-                    level_profile=level_profile_prompt(level),
-                )
-                
+                with st.spinner(f"영상 `{generating_video_id}`에 대한 퀴즈를 생성 중... (약 10초 소요)"):
+                    quiz, prompt = generate_quiz_with_checks(
+                        quiz_text,
+                        num_questions,
+                        level,
+                        gen_model,
+                        debug,
+                    )
+
                 if debug:
                     with st.expander("🔍 DEBUG: QUIZ_PROMPT"):
                         st.code(prompt[:1000])
-                
-                with st.spinner(f"영상 `{generating_video_id}`에 대한 퀴즈를 생성 중... (약 10초 소요)"):
-                    quiz = llm_json(prompt, model=gen_model)
                 
                 st.session_state["youtube_quiz"] = quiz
                 st.session_state.pop("youtube_coach", None)
@@ -3860,7 +4310,7 @@ def render_youtube_page():
                                 condition=condition_simple,
                             )
                             
-                            with st.spinner("채점 중... (Structured Outputs 사용)"):
+                            with st.spinner("채점 중..."):
                                 # Structured Outputs 사용
                                 coach = llm_structured(prompt, CoachResponse, model=gen_model)
                                 coach = sanitize_coach_structured(coach, youtube_quiz, user_answers)
@@ -3946,6 +4396,9 @@ def render_youtube_page():
             wrong_items_by_id = {str(item.get("id")): item for item in wrong_items}
             items_by_id = {str(item.get("id")): item for item in youtube_coach.get("items", [])}
             user_answers = st.session_state.get("youtube_user_answers", {})
+            computed_wrong_items, _ = compute_wrong_items(questions, user_answers)
+            wrong_items_for_repeat = merge_wrong_items_for_repeat(wrong_items, computed_wrong_items)
+            all_correct = len(computed_wrong_items) == 0
 
             for q in questions:
                 qid = str(q.get("id"))
@@ -3985,7 +4438,7 @@ def render_youtube_page():
                 st.markdown(f"→ _{s.get('ko', '')}_")
                 st.markdown("")
             
-            # AI 학습 코치 및 반복 학습 (오답이 있을 때만 표시)
+            # AI 학습 코치 (코치 결과 기반)
             if wrong_items and len(wrong_items) > 0:
                 st.divider()
                 render_ai_learning_coach(
@@ -3994,21 +4447,31 @@ def render_youtube_page():
                     condition=condition,
                     key_prefix="youtube"
                 )
-                
-                st.divider()
-                
-                # 반복 학습이 이미 진행 중인지 확인
-                repeat_progress = RepeatLearningManager.get_progress("video")
-                
-                if not repeat_progress["active"]:
-                    # 반복 학습 시작 버튼
-                    st.markdown("#### 🔄 반복 학습")
-                    st.info(f"💡 틀린 문제 {len(wrong_items)}개를 모두 맞출 때까지 반복 학습할 수 있습니다!")
+            
+            st.divider()
+            
+            # 반복 학습이 이미 진행 중인지 확인
+            repeat_progress = RepeatLearningManager.get_progress("video")
+
+            if is_debug_mode():
+                st.caption(
+                    f"[debug] mode=video all_correct={all_correct} "
+                    f"wrong_count={len(computed_wrong_items)} "
+                    f"repeat_active={repeat_progress['active']}"
+                )
+
+            st.markdown("#### 🔄 반복 학습")
+            
+            if repeat_progress["active"]:
+                render_repeat_learning_ui("video", key_prefix="youtube")
+            else:
+                if not all_correct:
+                    st.info(f"💡 틀린 문제 {len(computed_wrong_items)}개를 모두 맞출 때까지 반복 학습할 수 있습니다!")
                     
                     if st.button("🚀 틀린 문제 반복 학습 시작", type="primary", width="stretch", key="youtube_start_repeat"):
                         # 취약점 분석 추가
                         analyzed_wrong = []
-                        for item in wrong_items:
+                        for item in wrong_items_for_repeat:
                             q_id = str(item.get("id"))
                             orig_q = next((q for q in questions if str(q.get("id")) == q_id), {})
                             analyzed = WeaknessAnalyzer.analyze_wrong_answer(
@@ -4025,7 +4488,7 @@ def render_youtube_page():
                         st.rerun()
                     entry_payload, entry_q_id = build_repeat_entry_shadowing_payload(
                         "video",
-                        wrong_items,
+                        wrong_items_for_repeat,
                         questions,
                     )
                     if entry_payload and st.button(
@@ -4042,20 +4505,26 @@ def render_youtube_page():
                         st.session_state["force_review_tab"] = True
                         set_shadowing_payload_and_go(entry_payload, navigate_to_page)
                 else:
-                    # 반복 학습 UI 표시
-                    render_repeat_learning_ui("video", key_prefix="youtube")
-                
-                # 학습 결과 페이지로 이동 버튼
-                st.divider()
-                if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="youtube_goto_results"):
-                    navigate_to_page("results")
-            else:
-                st.divider()
-                st.success("🎉 모든 문제를 맞혔습니다! 완벽해요!")
-                
-                # 학습 결과 페이지로 이동 버튼
-                if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="youtube_goto_results_perfect"):
-                    navigate_to_page("results")
+                    st.success("🎉 모든 문제 정답입니다! 이제 유사 문제로 한 번 더 다져볼까요?")
+                    if st.button(
+                        "🔄 유사 문제로 반복 학습 시작",
+                        type="primary",
+                        width="stretch",
+                        key="youtube_start_similar_repeat",
+                    ):
+                        with st.spinner("유사 문제를 생성 중..."):
+                            similar_questions = build_similar_repeat_seed_questions(
+                                "video",
+                                questions,
+                                model=gen_model,
+                            )
+                        RepeatLearningManager.start_custom("video", similar_questions, kind="similar")
+                        st.rerun()
+            
+            # 학습 결과 페이지로 이동 버튼
+            st.divider()
+            if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="youtube_goto_results"):
+                navigate_to_page("results")
     else:
         st.info("""
         📝 **요약을 작성해주세요!**
@@ -4075,7 +4544,8 @@ def render_youtube_page():
 
 def render_text_page():
     """텍스트 학습 페이지 렌더링"""
-    
+    gen_model = st.session_state.get("gen_model", "gpt-4o-mini")
+
     st.header("📄 텍스트로 학습하기")
     st.markdown("웹 링크를 입력하면 텍스트를 추출하여 학습 자료로 사용합니다.")
 
@@ -4123,6 +4593,7 @@ def render_text_page():
             st.session_state.pop("text_quiz", None)
             st.session_state.pop("text_coach", None)
             reset_mode_ephemeral("text")
+            RepeatLearningManager.reset("text")
             st.success(f"✅ 추출 완료: {result['title']}")
             st.rerun()
         else:
@@ -4178,20 +4649,18 @@ def render_text_page():
         if saved_text:
             try:
                 quiz_text = saved_text[:4000] if len(saved_text) > 4000 else saved_text
-                prompt = safe_prompt_fill(
-                    QUIZ_PROMPT,
-                    num_questions=str(num_questions),
-                    transcript=quiz_text,
-                    level=level,
-                    level_profile=level_profile_prompt(level),
-                )
-                
+                with st.spinner("퀴즈를 생성 중... (약 10초 소요)"):
+                    quiz, prompt = generate_quiz_with_checks(
+                        quiz_text,
+                        num_questions,
+                        level,
+                        gen_model,
+                        debug,
+                    )
+
                 if debug:
                     with st.expander("🔍 DEBUG: QUIZ_PROMPT"):
                         st.code(prompt[:1000])
-                
-                with st.spinner("퀴즈를 생성 중... (약 10초 소요)"):
-                    quiz = llm_json(prompt, model=gen_model)
                 
                 st.session_state["text_quiz"] = quiz
                 st.session_state.pop("text_coach", None)
@@ -4262,7 +4731,7 @@ def render_text_page():
                                 condition=condition_simple,
                             )
                             
-                            with st.spinner("채점 중... (Structured Outputs 사용)"):
+                            with st.spinner("채점 중..."):
                                 # Structured Outputs 사용
                                 coach = llm_structured(prompt, CoachResponse, model=gen_model)
                                 coach = sanitize_coach_structured(coach, text_quiz, user_answers)
@@ -4344,6 +4813,9 @@ def render_text_page():
             wrong_items_by_id = {str(item.get("id")): item for item in wrong_items}
             items_by_id = {str(item.get("id")): item for item in text_coach.get("items", [])}
             user_answers = st.session_state.get("text_user_answers", {})
+            computed_wrong_items, _ = compute_wrong_items(questions, user_answers)
+            wrong_items_for_repeat = merge_wrong_items_for_repeat(wrong_items, computed_wrong_items)
+            all_correct = len(computed_wrong_items) == 0
 
             for q in questions:
                 qid = str(q.get("id"))
@@ -4383,7 +4855,7 @@ def render_text_page():
                 st.markdown(f"→ _{s.get('ko', '')}_")
                 st.markdown("")
             
-            # AI 학습 코치 및 반복 학습 (오답이 있을 때만 표시)
+            # AI 학습 코치 (코치 결과 기반)
             if wrong_items and len(wrong_items) > 0:
                 st.divider()
                 render_ai_learning_coach(
@@ -4392,21 +4864,31 @@ def render_text_page():
                     condition=condition,
                     key_prefix="text"
                 )
-                
-                st.divider()
-                
-                # 반복 학습이 이미 진행 중인지 확인
-                repeat_progress = RepeatLearningManager.get_progress("text")
-                
-                if not repeat_progress["active"]:
-                    # 반복 학습 시작 버튼
-                    st.markdown("#### 🔄 반복 학습")
-                    st.info(f"💡 틀린 문제 {len(wrong_items)}개를 모두 맞출 때까지 반복 학습할 수 있습니다!")
+            
+            st.divider()
+            
+            # 반복 학습이 이미 진행 중인지 확인
+            repeat_progress = RepeatLearningManager.get_progress("text")
+
+            if is_debug_mode():
+                st.caption(
+                    f"[debug] mode=text all_correct={all_correct} "
+                    f"wrong_count={len(computed_wrong_items)} "
+                    f"repeat_active={repeat_progress['active']}"
+                )
+
+            st.markdown("#### 🔄 반복 학습")
+            
+            if repeat_progress["active"]:
+                render_repeat_learning_ui("text", key_prefix="text")
+            else:
+                if not all_correct:
+                    st.info(f"💡 틀린 문제 {len(computed_wrong_items)}개를 모두 맞출 때까지 반복 학습할 수 있습니다!")
                     
                     if st.button("🚀 틀린 문제 반복 학습 시작", type="primary", width="stretch", key="text_start_repeat"):
                         # 취약점 분석 추가
                         analyzed_wrong = []
-                        for item in wrong_items:
+                        for item in wrong_items_for_repeat:
                             q_id = str(item.get("id"))
                             orig_q = next((q for q in questions if str(q.get("id")) == q_id), {})
                             analyzed = WeaknessAnalyzer.analyze_wrong_answer(
@@ -4423,7 +4905,7 @@ def render_text_page():
                         st.rerun()
                     entry_payload, entry_q_id = build_repeat_entry_shadowing_payload(
                         "text",
-                        wrong_items,
+                        wrong_items_for_repeat,
                         questions,
                     )
                     if entry_payload and st.button(
@@ -4440,20 +4922,26 @@ def render_text_page():
                         st.session_state["force_review_tab"] = True
                         set_shadowing_payload_and_go(entry_payload, navigate_to_page)
                 else:
-                    # 반복 학습 UI 표시
-                    render_repeat_learning_ui("text", key_prefix="text")
-                
-                # 학습 결과 페이지로 이동 버튼
-                st.divider()
-                if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="text_goto_results"):
-                    navigate_to_page("results")
-            else:
-                st.divider()
-                st.success("🎉 모든 문제를 맞혔습니다! 완벽해요!")
-                
-                # 학습 결과 페이지로 이동 버튼
-                if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="text_goto_results_perfect"):
-                    navigate_to_page("results")
+                    st.success("🎉 모든 문제 정답입니다! 이제 유사 문제로 한 번 더 다져볼까요?")
+                    if st.button(
+                        "🔄 유사 문제로 반복 학습 시작",
+                        type="primary",
+                        width="stretch",
+                        key="text_start_similar_repeat",
+                    ):
+                        with st.spinner("유사 문제를 생성 중..."):
+                            similar_questions = build_similar_repeat_seed_questions(
+                                "text",
+                                questions,
+                                model=gen_model,
+                            )
+                        RepeatLearningManager.start_custom("text", similar_questions, kind="similar")
+                        st.rerun()
+            
+            # 학습 결과 페이지로 이동 버튼
+            st.divider()
+            if st.button(UI["btn_view_progress"], type="primary", width="stretch", key="text_goto_results"):
+                navigate_to_page("results")
 
 
     # ✅ 페이지 하단 중앙 홈 버튼
@@ -4901,20 +5389,18 @@ def render_results_page():
                 try:
                     # 텍스트가 너무 길면 잘라서 사용
                     quiz_text = available_transcript[:4000] if len(available_transcript) > 4000 else available_transcript
-                    prompt = safe_prompt_fill(
-                        QUIZ_PROMPT,
-                        num_questions=str(num_questions),
-                        transcript=quiz_text,
-                        level=level,
-                        level_profile=level_profile_prompt(level),
-                    )
-             
+                    with st.spinner("퀴즈를 생성 중..."):
+                        quiz, prompt = generate_quiz_with_checks(
+                            quiz_text,
+                            num_questions,
+                            level,
+                            gen_model,
+                            debug,
+                        )
+
                     if debug:
                         with st.expander("🔍 DEBUG: QUIZ_PROMPT (일부)"):
                             st.code(prompt[:1200])
-                    
-                    with st.spinner("퀴즈를 생성 중..."):
-                        quiz = llm_json(prompt, model=gen_model)
                     
                     st.session_state["quiz"] = quiz
                     st.session_state.pop("coach", None)  # 이전 코칭 결과 초기화
@@ -4985,7 +5471,7 @@ def render_results_page():
                                 with st.expander("🔍 DEBUG: COACH_PROMPT (일부)"):
                                     st.code(prompt[:1200])
                             
-                            with st.spinner("코칭 결과를 생성 중... (Structured Outputs 사용)"):
+                            with st.spinner("코칭 결과를 생성 중..."):
                                 # Structured Outputs 사용
                                 coach = llm_structured(prompt, CoachResponse, model=gen_model)
                                 coach = sanitize_coach_structured(coach, quiz, user_answers)
