@@ -38,6 +38,13 @@ from ui.header import inject_global_css, render_header
 from ui.mode_state import MODES, get_mode_state, reset_mode_ephemeral, record_mode_result
 from ui.effects import celebrate_confetti
 
+# core 로직 모듈 (UI와 분리된 순수 파이썬 로직)
+from core.asr import transcribe_audio as core_transcribe_audio
+from core.level import get_level_profile
+from core.quiz import generate_quiz
+from core.grading import grade_quiz
+from core.repeat import build_repeat_seeds
+
 # OpenAI 설정
 # 로컬 개발에서는 .env가 있으면 읽고, 배포에서는 무시되어도 문제 없음
 load_dotenv()
@@ -78,6 +85,14 @@ YOUTUBE_WRITING_FEEDBACK_PROMPT = P.YOUTUBE_WRITING_FEEDBACK_PROMPT
 APP_TITLE = "Bisa Q"  # 브라우저 탭(title)용
 MODEL_ID = "Sparkplugx1904/whisper-base-id"
 TARGET_SR = 16000
+
+@st.cache_resource
+def get_cached_asr_pipe(model_id: str):
+    # transformers.pipeline은 이미 상단에서 import 되어 있으므로 그대로 사용
+    return pipeline("automatic-speech-recognition", model=model_id)
+
+asr_pipe = get_cached_asr_pipe(MODEL_ID)
+
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 LOGO_PATH = Path("assets/Logo.png")
@@ -269,56 +284,6 @@ def load_asr():
         model=MODEL_ID,
         device=device,
     )
-
-
-def read_wav_resample(path: str, target_sr: int = 16000):
-    """
-    WAV 파일을 읽고 목표 샘플링 레이트로 리샘플링합니다.
-    
-    Args:
-        path: WAV 파일 경로
-        target_sr: 목표 샘플링 레이트 (기본값: 16000 Hz)
-    
-    Returns:
-        (audio, sr): numpy 배열과 샘플링 레이트
-    """
-    audio, sr = sf.read(path)
-    
-    # 스테레오 -> 모노 변환
-    if audio.ndim > 1:
-        audio = np.mean(audio, axis=1)
-    
-    audio = audio.astype(np.float32)
-    
-    # 리샘플링
-    if sr != target_sr:
-        t = torch.from_numpy(audio).unsqueeze(0)  # [1, T]
-        t = torchaudio.functional.resample(t, sr, target_sr)
-        audio = t.squeeze(0).numpy()
-        sr = target_sr
-    
-    return audio, sr
-
-
-def transcribe_audio(asr_pipe, wav_path: str) -> str:
-    """
-    오디오 파일을 텍스트로 변환합니다.
-    
-    Args:
-        asr_pipe: ASR 파이프라인
-        wav_path: WAV 파일 경로
-    
-    Returns:
-        str: 변환된 텍스트
-    """
-    audio, sr = read_wav_resample(wav_path, TARGET_SR)
-    result = asr_pipe(
-        {"array": audio, "sampling_rate": sr},
-        generate_kwargs={"task": "transcribe", "language": "indonesian"},
-        chunk_length_s=20,
-        stride_length_s=3,
-    )
-    return result["text"].strip()
 
 
 # =====================================================
@@ -3571,34 +3536,42 @@ def render_audio_page():
     # 오디오 재생
     if wav_path:
         st.audio(wav_path, format="audio/wav")
-        
+
         # ASR 실행 버튼
         if st.button("🎤 음성 → 텍스트 변환", type="primary", key="btn_asr", width="stretch"):
-            asr = load_asr()
+            asr_pipe = load_asr()  # @st.cache_resource라 1회 로드 후 재사용
             t0 = time.perf_counter()
-            
+
             try:
                 with st.spinner("음성을 텍스트로 변환 중... (CPU에서는 시간이 걸릴 수 있습니다)"):
-                    transcript = transcribe_audio(asr, wav_path)
+                    transcript = core_transcribe_audio(
+                        asr_pipe,
+                        wav_path,
+                        target_sr=TARGET_SR,
+                        language="indonesian",
+                    )
+
                     # 가독성을 위해 오디오 전용 포맷팅 적용 (문장 단위로 3개씩 문단 구분)
                     formatted_transcript = format_audio_transcript(transcript, sentences_per_paragraph=3)
                     st.session_state["audio_transcript"] = formatted_transcript
                     st.session_state["current_source"] = f"Audio: {os.path.basename(wav_path)}"
+
                     # 퀴즈 초기화
                     st.session_state.pop("audio_quiz", None)
                     st.session_state.pop("audio_coach", None)
                     reset_mode_ephemeral("audio")
                     RepeatLearningManager.reset("audio")
-                
+
                 dt = time.perf_counter() - t0
                 st.success(f"✅ 변환 완료! ({dt:.1f}초 소요)")
                 st.rerun()
-            
+
             except Exception as e:
                 st.error("❌ 변환 실패")
                 st.exception(e)
     else:
         st.info("👆 오디오 파일을 선택해주세요.")
+
     
     # 2단계: 변환된 텍스트
     audio_transcript = st.session_state.get("audio_transcript", "")
