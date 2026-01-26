@@ -9,7 +9,9 @@ import streamlit as st
 def inject_global_css(css_path: Path) -> None:
     if not css_path.exists():
         return
-    st.markdown(f"<style>{css_path.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
+    st.markdown(
+        f"<style>{css_path.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True
+    )
 
 
 def render_header(
@@ -42,9 +44,9 @@ def render_header(
         )
 
     st.markdown(
-    f'<div id="header-nav-anchor"></div><div id="app-header" data-active-page="{current_page}">',
-    unsafe_allow_html=True,
-)
+        f'<div id="header-nav-anchor"></div><div id="app-header" data-active-page="{current_page}">',
+        unsafe_allow_html=True,
+    )
     logo_col, nav_col, cta_col = st.columns([2, 7, 2])
 
     with logo_col:
@@ -57,7 +59,9 @@ def render_header(
         nav_cols = st.columns(len(nav_items))
         for (page, label), col in zip(nav_items, nav_cols):
             with col:
-                if st.button(label, key=f"nav_{page}", type="secondary", width="stretch"):
+                if st.button(
+                    label, key=f"nav_{page}", type="secondary", width="stretch"
+                ):
                     navigate_to_page(page)
 
     with cta_col:

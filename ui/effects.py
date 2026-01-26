@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import time
 from html import escape as _escape
 
 import streamlit as st
 import streamlit.components.v1 as components
 
 
-def celebrate_confetti(key: str | None = None, message: str = "🎉 Great job!", force: bool = False) -> None:
+def celebrate_confetti(
+    key: str | None = None, message: str = "🎉 Great job!", force: bool = False
+) -> None:
     """
     Streamlit components.html()은 iframe 안에서 실행됩니다.
     height=0일 경우 confetti 캔버스가 iframe 내부에 생성되어 "안 보이는" 문제가 자주 발생합니다.
@@ -119,7 +120,9 @@ def celebrate_confetti(key: str | None = None, message: str = "🎉 Great job!",
         # height=1로 "컴포넌트가 실제로 mount"되도록 보장 (0은 브라우저에서 완전히 안 보일 수 있음)
         # Streamlit 버전에 따라 key 인자가 없을 수 있어 안전하게 처리
         try:
-            components.html(html_code, height=1, scrolling=False, key=f"st_confetti_{key}_{run_id}")
+            components.html(
+                html_code, height=1, scrolling=False, key=f"st_confetti_{key}_{run_id}"
+            )
         except TypeError:
             components.html(html_code, height=1, scrolling=False)
 
@@ -138,4 +141,3 @@ def reset_confetti(key: str) -> None:
     """같은 key로 confetti를 다시 실행하고 싶을 때 호출"""
     st.session_state.pop(f"confetti_once_{key}", None)
     st.session_state.pop(f"confetti_run_{key}", None)
-
