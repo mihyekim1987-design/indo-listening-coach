@@ -251,50 +251,55 @@ CEFR_WEAKNESS_CATEGORIES = {
         "name_ko": "어휘",
         "name_id": "Kosakata",
         "description": "단어 의미, 동의어, 반의어, 문맥상 어휘 선택",
-        "cefr_descriptors": ["A1: 기본 어휘", "A2: 일상 어휘", "B1: 확장 어휘", "B2: 추상적 어휘"]
+        "cefr_descriptors": [
+            "A1: 기본 어휘",
+            "A2: 일상 어휘",
+            "B1: 확장 어휘",
+            "B2: 추상적 어휘",
+        ],
     },
     "grammar_tense": {
         "name_ko": "시제",
         "name_id": "Tense/Kala",
         "description": "sudah, sedang, akan, belum 등 시제 표현",
-        "cefr_descriptors": ["A1: 현재/과거 기본", "A2: 미래/완료", "B1: 복합 시제"]
+        "cefr_descriptors": ["A1: 현재/과거 기본", "A2: 미래/완료", "B1: 복합 시제"],
     },
     "grammar_affix": {
         "name_ko": "접사",
         "name_id": "Imbuhan",
         "description": "me-, ber-, di-, -kan, -i, -an 등 접사 활용",
-        "cefr_descriptors": ["A1: me-/ber- 기본", "A2: di-/-kan 수동", "B1: 복합 접사"]
+        "cefr_descriptors": ["A1: me-/ber- 기본", "A2: di-/-kan 수동", "B1: 복합 접사"],
     },
     "numbers": {
         "name_ko": "숫자/수량",
         "name_id": "Angka/Bilangan",
         "description": "숫자, 날짜, 시간, 수량 표현",
-        "cefr_descriptors": ["A1: 기본 숫자", "A2: 날짜/시간", "B1: 복잡한 수량"]
+        "cefr_descriptors": ["A1: 기본 숫자", "A2: 날짜/시간", "B1: 복잡한 수량"],
     },
     "honorifics": {
         "name_ko": "경어/존칭",
         "name_id": "Bahasa Hormat",
         "description": "Bapak, Ibu, Anda, kamu 등 존칭 및 격식체",
-        "cefr_descriptors": ["A1: 기본 호칭", "A2: 상황별 격식", "B1: 미묘한 뉘앙스"]
+        "cefr_descriptors": ["A1: 기본 호칭", "A2: 상황별 격식", "B1: 미묘한 뉘앙스"],
     },
     "comprehension": {
         "name_ko": "독해/청해",
         "name_id": "Pemahaman",
         "description": "텍스트 이해, 핵심 정보 파악, 추론",
-        "cefr_descriptors": ["A1: 단순 사실", "A2: 세부 정보", "B1: 추론/요지"]
+        "cefr_descriptors": ["A1: 단순 사실", "A2: 세부 정보", "B1: 추론/요지"],
     },
     "sentence_structure": {
         "name_ko": "문장 구조",
         "name_id": "Struktur Kalimat",
         "description": "어순, 접속사, 관계절 등",
-        "cefr_descriptors": ["A1: 단문", "A2: 복문 기초", "B1: 복잡한 문장"]
+        "cefr_descriptors": ["A1: 단문", "A2: 복문 기초", "B1: 복잡한 문장"],
     },
     "context": {
         "name_ko": "문맥 이해",
         "name_id": "Konteks",
         "description": "상황에 맞는 표현 선택, 문맥상 의미 파악",
-        "cefr_descriptors": ["A2: 기본 문맥", "B1: 함축적 의미", "B2: 미묘한 차이"]
-    }
+        "cefr_descriptors": ["A2: 기본 문맥", "B1: 함축적 의미", "B2: 미묘한 차이"],
+    },
 }
 
 

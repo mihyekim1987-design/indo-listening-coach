@@ -6,12 +6,16 @@ from .grading import WrongItem
 
 RepeatMode = Literal["wrong_repeat", "similar_repeat"]
 
+
 @dataclass
 class RepeatSeed:
     mode: RepeatMode
     prompt_seed: str
 
-def build_repeat_seeds(wrong_items: List[WrongItem], mode: RepeatMode) -> List[RepeatSeed]:
+
+def build_repeat_seeds(
+    wrong_items: List[WrongItem], mode: RepeatMode
+) -> List[RepeatSeed]:
     seeds: List[RepeatSeed] = []
     for wi in wrong_items:
         if mode == "wrong_repeat":

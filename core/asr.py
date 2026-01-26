@@ -6,6 +6,7 @@ import soundfile as sf
 import torch
 import torchaudio
 
+
 def read_wav_resample(path: str, target_sr: int = 16000) -> Tuple[np.ndarray, int]:
     audio, sr = sf.read(path)
 
@@ -21,6 +22,7 @@ def read_wav_resample(path: str, target_sr: int = 16000) -> Tuple[np.ndarray, in
         sr = target_sr
 
     return audio, sr
+
 
 def transcribe_audio(
     asr_pipe: Any,
