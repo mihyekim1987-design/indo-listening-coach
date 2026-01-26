@@ -41,7 +41,7 @@ from ui.effects import celebrate_confetti
 # core 로직 모듈 (UI와 분리된 순수 파이썬 로직)
 from core.asr import transcribe_audio as core_transcribe_audio
 from core.level import get_level_profile
-from core.quiz import generate_quiz
+from core.quiz import generate_quiz as core_generate_quiz
 from core.grading import grade_quiz
 from core.repeat import build_repeat_seeds
 
@@ -3601,13 +3601,17 @@ def render_audio_page():
             try:
                 quiz_text = audio_transcript[:4000] if len(audio_transcript) > 4000 else audio_transcript
                 with st.spinner("퀴즈를 생성 중... (약 10초 소요)"):
-                    quiz, prompt = generate_quiz_with_checks(
-                        quiz_text,
-                        num_questions,
-                        level,
-                        gen_model,
-                        debug,
-                    )
+                   profile = get_level_profile(level)  # level이 "A1"~"C2" 문자열이라 가정
+                   quiz_result = core_generate_quiz(
+                       client=client,
+                       model=gen_model,
+                       template=QUIZ_PROMPT,
+                       transcript=quiz_text,
+                       profile=profile,
+                   )
+
+                   quiz = quiz_result.payload
+                   prompt = None  # debug용 prompt가 필요하면 core/quiz.py에서 반환하도록 확장 가능
 
                 if debug:
                     with st.expander("🔍 DEBUG: QUIZ_PROMPT"):
