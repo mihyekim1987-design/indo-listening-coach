@@ -1,0 +1,10 @@
+# .streamlit/config.toml
+
+[client]
+# 배포 시 사용자에게 스택트레이스(에러 상세)를 과하게 노출하지 않도록
+showErrorDetails = "none"
+
+[theme]
+# base = "light" 또는 "dark"
+base = "light"
+font = "sans serif"

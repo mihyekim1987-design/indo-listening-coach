@@ -105,6 +105,8 @@ learning_history.json
 .env.*.local
 secrets.toml
 api_keys.txt
+.streamlit/secrets.toml
+
 
 # Audio files (keep locally, don't commit)
 *.wav

@@ -15,7 +15,6 @@ import re
 import glob
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
-from typing import Optional
 import streamlit as st
 import numpy as np
 import soundfile as sf
@@ -23,6 +22,7 @@ import torch
 from transformers import pipeline
 import torchaudio
 from dotenv import load_dotenv
+from openai import OpenAI
 import requests
 from bs4 import BeautifulSoup
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -39,13 +39,23 @@ from ui.mode_state import MODES, get_mode_state, reset_mode_ephemeral, record_mo
 from ui.effects import celebrate_confetti
 
 # OpenAI 설정
+# 로컬 개발에서는 .env가 있으면 읽고, 배포에서는 무시되어도 문제 없음
 load_dotenv()
-from openai import OpenAI
-client = OpenAI()
+
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    st.error("OPENAI_API_KEY가 설정되지 않았습니다. .streamlit/secrets.toml 또는 환경변수를 확인하세요.")
+    st.stop()
+
+@st.cache_resource
+def get_openai_client(api_key: str):
+    return OpenAI(api_key=api_key)
+
+client = get_openai_client(OPENAI_API_KEY)
 
 # Pydantic 모델 (Structured Outputs용)
 from pydantic import BaseModel
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple, Any
 
 # 프롬프트 불러오기
 import prompts as P
