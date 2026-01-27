@@ -3769,28 +3769,7 @@ def render_home_page():
 
     st.markdown('<div id="card-grid"></div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="home-card-grid">', unsafe_allow_html=True)
-    col1, col2, col3 = st.columns(3, gap="large")
-    with col1:
-        if st.button(UI["card_audio"], key="btn_audio", width="stretch"):
-            navigate_to_page("audio")
-    with col2:
-        if st.button(UI["card_youtube"], key="btn_youtube", width="stretch"):
-            navigate_to_page("youtube")
-    with col3:
-        if st.button(UI["card_text"], key="btn_text", width="stretch"):
-            navigate_to_page("text")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown('<div class="home-card-grid">', unsafe_allow_html=True)
-    left_spacer, col4, col5, right_spacer = st.columns([1, 2, 2, 1], gap="large")
-    with col4:
-        if st.button(UI["card_results"], key="btn_results", width="stretch"):
-            navigate_to_page("results")
-    with col5:
-        if st.button(UI["card_settings"], key="btn_settings", width="stretch"):
-            navigate_to_page("settings")
-    st.markdown("</div>", unsafe_allow_html=True)
+    # Duplicate home nav cards removed to avoid double-rendering under the hero.
 
 
 # =====================================================
