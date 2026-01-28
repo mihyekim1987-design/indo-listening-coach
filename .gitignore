@@ -150,3 +150,15 @@ ui_reference_images.zip
 assets/Reference*.png
 assets/ui_reference_images.zip
 
+
+# --- demo/test artifacts ---
+quiz_payload*.json
+quiz_response*.json
+user_answers*.json
+
+# python cache
+__pycache__/
+*.pyc
+
+# streamlit secrets (절대 커밋 금지)
+.streamlit/secrets.toml

@@ -25,3 +25,7 @@ pydub>=0.25.1
 
 # Google Cloud TTS (선택사항 - API 키가 있을 때만 사용)
 # google-cloud-texttospeech>=2.14.1
+
+fastapi
+uvicorn[standard]
+python-multipart
