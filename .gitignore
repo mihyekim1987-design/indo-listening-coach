@@ -162,3 +162,9 @@ __pycache__/
 
 # streamlit secrets (절대 커밋 금지)
 .streamlit/secrets.toml
+quiz_payload*.json
+quiz_response*.json
+user_answers*.json
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
