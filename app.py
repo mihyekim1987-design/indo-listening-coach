@@ -14,6 +14,7 @@ import json
 import time
 import re
 import glob
+import math
 from datetime import datetime, timedelta
 import streamlit as st
 import torch
@@ -614,6 +615,25 @@ def extract_text_from_url(url: str, timeout: int = 20, min_chars: int = 200) -> 
         }
 
 
+def extract_youtube_video_id(url_or_id: str) -> str | None:
+    s = (url_or_id or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", s):
+        return s
+    m = re.search(r"(?:v=)([A-Za-z0-9_-]{11})", s)
+    if m:
+        return m.group(1)
+    m = re.search(r"youtu\.be/([A-Za-z0-9_-]{11})", s)
+    if m:
+        return m.group(1)
+    m = re.search(r"/shorts/([A-Za-z0-9_-]{11})", s)
+    if m:
+        return m.group(1)
+    m = re.search(r"/embed/([A-Za-z0-9_-]{11})", s)
+    if m:
+        return m.group(1)
+    return None
+
+
 def extract_youtube_id(url: str) -> str:
     """
     YouTube URL에서 비디오 ID를 추출합니다.
@@ -624,17 +644,66 @@ def extract_youtube_id(url: str) -> str:
     Returns:
         str: 비디오 ID (실패 시 빈 문자열)
     """
-    patterns = [
-        r"(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})",
-        r"youtube\.com\/embed\/([a-zA-Z0-9_-]{11})",
-    ]
+    video_id = extract_youtube_video_id(url)
+    return video_id or ""
 
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
 
-    return ""
+def render_youtube_16x9(
+    url_or_id: str,
+    *,
+    start_sec: int | None = None,
+    max_width_px: int = 960,
+    aspect_w: int = 16,
+    aspect_h: int = 9,
+):
+    vid = extract_youtube_video_id(url_or_id)
+    if not vid:
+        st.error("유효하지 않은 YouTube 링크/ID입니다. (video id 11자리 확인)")
+        return
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
+        st.error("유효하지 않은 YouTube video_id 형식입니다.")
+        return
+
+    qs = f"?start={int(start_sec)}" if start_sec is not None else ""
+    embed_src = f"https://www.youtube.com/embed/{vid}{qs}"
+    needed_height = int(math.ceil(max_width_px * (aspect_h / aspect_w))) + 48
+
+    html = f"""
+    <style>
+      .yt-wrap {{
+        width: 100%;
+        max-width: {max_width_px}px;
+        margin: 0 auto;
+      }}
+      .yt-box {{
+        width: 100%;
+        aspect-ratio: {aspect_w} / {aspect_h};
+        background: #000;
+        position: relative;
+        border-radius: 12px;
+        overflow: hidden;
+      }}
+      .yt-box iframe {{
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        border: 0;
+      }}
+    </style>
+    <div class="yt-wrap">
+      <div class="yt-box">
+        <iframe
+          src="{embed_src}"
+          title="YouTube video player"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          allowfullscreen
+        ></iframe>
+      </div>
+    </div>
+    """
+    components.html(html, height=needed_height, scrolling=False)
 
 
 def format_transcript_readable(fetched) -> str:
@@ -4388,17 +4457,7 @@ def render_youtube_page():
         video_id = extract_youtube_id(youtube_url)
 
         if video_id:
-            st.markdown(
-                f"""
-            <iframe width="100%" height="400" 
-            src="https://www.youtube.com/embed/{video_id}" 
-            frameborder="0" 
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
-            allowfullscreen>
-            </iframe>
-            """,
-                unsafe_allow_html=True,
-            )
+            render_youtube_16x9(youtube_url)
 
             st.caption(f"출처: YouTube | {youtube_url}")
             st.session_state["current_source"] = f"YouTube: {youtube_url}"
