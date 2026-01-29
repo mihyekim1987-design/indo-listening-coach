@@ -15,6 +15,7 @@ import time
 import re
 import glob
 import math
+import uuid
 from datetime import datetime, timedelta
 import streamlit as st
 import torch
@@ -3581,6 +3582,137 @@ def generate_quiz_with_checks(
     return quiz, prompt
 
 
+def normalize_progress_quiz_input(record: Optional[dict]) -> Optional[dict]:
+    record = record or {}
+    source_type = (
+        record.get("source_type") or record.get("mode") or record.get("input_type")
+    )
+    source_ref = (
+        record.get("source")
+        or record.get("source_ref")
+        or record.get("url")
+        or record.get("audio_path")
+    )
+    content_text = (
+        record.get("content_text")
+        or record.get("transcript")
+        or record.get("asr_text")
+        or record.get("text")
+    )
+    level = (
+        record.get("level")
+        or record.get("cefr_level")
+        or record.get("target_level")
+        or DEFAULT_LEVEL
+    )
+
+    if not content_text:
+        st.error(
+            "선택한 기록에 텍스트/자막이 없어 퀴즈를 생성할 수 없습니다."
+        )
+        return None
+
+    return {
+        "content_text": content_text,
+        "level": level,
+        "source_type": source_type or "unknown",
+        "source_ref": source_ref or "Unknown",
+        "record_id": record.get("id")
+        or record.get("record_id")
+        or record.get("timestamp"),
+    }
+
+
+def load_progress_records(result_files: list) -> list:
+    records = []
+    for path in sorted(result_files, key=os.path.getmtime, reverse=True):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                record = json.load(f)
+        except Exception:
+            continue
+
+        timestamp = record.get("timestamp") or datetime.fromtimestamp(
+            os.path.getmtime(path)
+        ).isoformat()
+        record_id = record.get("record_id") or record.get("id")
+        if not record_id:
+            record_id = f"{timestamp}-{os.path.basename(path)}"
+
+        preview_text = (
+            record.get("content_text")
+            or record.get("transcript")
+            or record.get("asr_text")
+            or record.get("text")
+            or ""
+        )
+        preview_text = " ".join(preview_text.strip().split())[:40]
+        source_label = (
+            record.get("source_type")
+            or record.get("mode")
+            or record.get("input_type")
+            or record.get("source")
+            or "unknown"
+        )
+        label = f"{timestamp[:16]} · {source_label} · {preview_text or 'no text'}"
+
+        record["_record_id"] = str(record_id)
+        record["_label"] = label
+        record["_file_path"] = path
+        records.append(record)
+    return records
+
+
+def save_learning_record(
+    *,
+    source_type: str,
+    source_ref: str,
+    content_text: str,
+    level: str,
+    extra: Optional[dict] = None,
+) -> Optional[str]:
+    if not content_text or not str(content_text).strip():
+        st.error("텍스트/자막이 비어 있어 레코드를 저장할 수 없습니다.")
+        return None
+
+    content_text = str(content_text).strip()
+    source_type = source_type or "unknown"
+    source_ref = source_ref or "Unknown"
+    level = level or DEFAULT_LEVEL
+
+    content_hash = hashlib.sha256(content_text.encode("utf-8")).hexdigest()
+    seen_key = f"record_hash_seen_{source_type}"
+    seen_hashes = st.session_state.get(seen_key, set())
+    if content_hash in seen_hashes:
+        return None
+    if not isinstance(seen_hashes, set):
+        seen_hashes = set(seen_hashes)
+
+    record_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    payload = {
+        "record_id": record_id,
+        "source_type": source_type,
+        "source_ref": source_ref,
+        "level": level,
+        "content_text": content_text,
+        "created_at": datetime.now().isoformat(),
+        "content_hash": content_hash,
+    }
+    if extra:
+        payload.update(extra)
+
+    fname = f"record_{record_id}.json"
+    fpath = os.path.join(LOG_DIR, fname)
+    try:
+        with open(fpath, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        seen_hashes.add(content_hash)
+        st.session_state[seen_key] = seen_hashes
+        return fpath
+    except Exception:
+        return None
+
+
 def render_learning_top_controls(mode: str, navigate_to_page_fn, key_prefix: str):
     settings = get_learning_settings_state()
     condition = settings["condition"]
@@ -3874,6 +4006,27 @@ def render_audio_page():
             )
 
     wav_path = None
+    selected_sample_id = None
+    selected_audio_hash = None
+    selected_audio_source = "sample" if use_sample else "upload"
+
+    def _derive_sample_id_from_path(
+        path: str, source: str, upload_name: Optional[str]
+    ):
+        base = os.path.basename(path)
+        name, _ext = os.path.splitext(base)
+        if source == "sample" and name.lower().startswith("sample_"):
+            return name.split("_", 1)[-1].upper()
+        if upload_name:
+            return f"upload:{os.path.splitext(upload_name)[0]}"
+        return name
+
+    def _compute_audio_hash(path: str) -> str:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return h.hexdigest()
     if use_sample:
         # 샘플 파일 경로 수정 (프로젝트 루트에 위치)
         sample_paths = [
@@ -3891,10 +4044,42 @@ def render_audio_page():
             )
     else:
         if uploaded is not None:
-            temp_path = os.path.join(LOG_DIR, f"upload_{int(time.time())}.wav")
+            temp_path = os.path.join(LOG_DIR, f"upload_{uuid.uuid4().hex}.wav")
             with open(temp_path, "wb") as f:
                 f.write(uploaded.getbuffer())
             wav_path = temp_path
+
+    if wav_path:
+        selected_sample_id = _derive_sample_id_from_path(
+            wav_path, selected_audio_source, uploaded.name if uploaded else None
+        )
+        selected_audio_hash = _compute_audio_hash(wav_path)
+
+    prev_source = st.session_state.get("selected_audio_source")
+    prev_sample_id = st.session_state.get("selected_sample_id")
+    prev_audio_path = st.session_state.get("selected_audio_path")
+    prev_audio_hash = st.session_state.get("selected_audio_hash")
+
+    if (
+        selected_audio_source != prev_source
+        or selected_sample_id != prev_sample_id
+        or wav_path != prev_audio_path
+        or selected_audio_hash != prev_audio_hash
+    ):
+        for key in [
+            "audio_transcript",
+            "audio_transcript_display",
+            "audio_quiz",
+            "audio_coach",
+            "start_audio_quiz_generation",
+            "current_source",
+        ]:
+            st.session_state.pop(key, None)
+
+    st.session_state["selected_audio_source"] = selected_audio_source
+    st.session_state["selected_sample_id"] = selected_sample_id
+    st.session_state["selected_audio_path"] = wav_path
+    st.session_state["selected_audio_hash"] = selected_audio_hash
 
     # 오디오 재생
     if wav_path:
@@ -3926,6 +4111,13 @@ def render_audio_page():
                     st.session_state["current_source"] = (
                         f"Audio: {os.path.basename(wav_path)}"
                     )
+                    save_learning_record(
+                        source_type="audio",
+                        source_ref=os.path.basename(wav_path),
+                        content_text=formatted_transcript,
+                        level=st.session_state.get("learning_level") or DEFAULT_LEVEL,
+                        extra={"audio_path": wav_path},
+                    )
 
                     # 퀴즈 초기화
                     st.session_state.pop("audio_quiz", None)
@@ -3945,6 +4137,14 @@ def render_audio_page():
 
     # 2단계: 변환된 텍스트
     audio_transcript = st.session_state.get("audio_transcript", "")
+
+    if is_debug_mode():
+        with st.expander("🔍 DEBUG: Audio Selection", expanded=False):
+            st.write(f"selected_sample_id={selected_sample_id}")
+            st.write(f"audio_path={wav_path}")
+            st.write(f"audio_hash={selected_audio_hash}")
+            if audio_transcript:
+                st.write(f"transcript_preview={audio_transcript[:80]}")
 
     if audio_transcript:
         st.divider()
@@ -4642,6 +4842,15 @@ def render_youtube_page():
             quiz_char_count = len(text_for_quiz)
 
             if quiz_char_count >= 50:
+                save_learning_record(
+                    source_type="video",
+                    source_ref=youtube_url or video_id,
+                    content_text=text_for_quiz,
+                    level=st.session_state.get("learning_level") or DEFAULT_LEVEL,
+                    extra={"video_id": video_id, "url": youtube_url},
+                )
+
+            if quiz_char_count >= 50:
                 # 버튼 key도 video_id를 포함시켜 URL마다 독립적으로
                 quiz_btn_key = f"btn_generate_youtube_quiz_{video_id}"
 
@@ -5173,6 +5382,13 @@ def render_text_page():
                 st.session_state["extracted_title"] = result["title"]
                 st.session_state["current_source"] = f"Web: {clean_url}"
                 st.session_state["current_text_url"] = clean_url  # 현재 URL 저장
+                save_learning_record(
+                    source_type="web",
+                    source_ref=clean_url,
+                    content_text=result["text"],
+                    level=st.session_state.get("learning_level") or DEFAULT_LEVEL,
+                    extra={"title": result["title"], "url": clean_url},
+                )
                 st.session_state.pop("text_quiz", None)
                 st.session_state.pop("text_coach", None)
                 reset_mode_ephemeral("text")
@@ -6088,35 +6304,86 @@ def render_results_page():
         # 퀴즈 생성 섹션
         st.subheader("📝 퀴즈 생성 및 풀이")
 
-        # 현재 사용 가능한 텍스트 확인
+        record_files = glob.glob(os.path.join(LOG_DIR, "record_*.json"))
+        progress_records = load_progress_records(record_files)
+
+        record_by_id = {r["_record_id"]: r for r in progress_records}
+        record_ids = list(record_by_id.keys())
+
+        if debug:
+            last_record = progress_records[0] if progress_records else {}
+            with st.expander("🔍 DEBUG: Progress Records", expanded=False):
+                st.write(f"records_count={len(record_ids)}")
+                st.write(f"last_record_id={last_record.get('_record_id')}")
+                st.write(
+                    f"last_record_source={last_record.get('source_type') or last_record.get('mode') or last_record.get('source')}"
+                )
+                preview = (
+                    last_record.get("content_text", "")
+                    or last_record.get("transcript", "")
+                    or last_record.get("asr_text", "")
+                    or last_record.get("text", "")
+                )
+                if preview:
+                    st.write(f"last_record_preview={preview[:80]}")
+
+        if record_ids:
+            default_id = st.session_state.get("progress_selected_record_id")
+            if default_id not in record_by_id:
+                default_id = record_ids[0]
+            selected_id = st.selectbox(
+                "기록 선택",
+                record_ids,
+                index=record_ids.index(default_id),
+                format_func=lambda rid: record_by_id[rid]["_label"],
+                key="progress_record_select",
+            )
+            selected_record = record_by_id.get(selected_id) or {}
+            st.session_state["progress_selected_record_id"] = selected_id
+            st.session_state["progress_selected_record"] = selected_record
+        else:
+            selected_record = {}
+
         available_transcript = (
-            st.session_state.get("audio_transcript")
-            or st.session_state.get("youtube_transcript")
-            or st.session_state.get("extracted_text")
+            selected_record.get("content_text")
+            or selected_record.get("transcript")
+            or selected_record.get("asr_text")
+            or selected_record.get("text")
         )
 
-        if not available_transcript:
+        if not record_ids:
             st.info(
                 "📌 먼저 '오디오 학습', 'YouTube 학습', 또는 '텍스트 학습' 탭에서 학습 자료를 준비해주세요."
             )
+        elif not available_transcript:
+            st.error("선택한 기록에 텍스트/자막이 없어 퀴즈를 생성할 수 없습니다.")
         else:
-            current_source = st.session_state.get("current_source", "Unknown")
+            current_source = (
+                selected_record.get("source")
+                or selected_record.get("source_ref")
+                or selected_record.get("url")
+                or selected_record.get("audio_path")
+                or "Unknown"
+            )
             st.caption(f"**출처:** {current_source}")
 
             # 퀴즈 생성 버튼
             if st.button("🎯 퀴즈 5문항 생성", type="primary", key="btn_generate_quiz"):
                 try:
+                    normalized = normalize_progress_quiz_input(selected_record)
+                    if not normalized:
+                        st.stop()
                     # 텍스트가 너무 길면 잘라서 사용
                     quiz_text = (
-                        available_transcript[:4000]
-                        if len(available_transcript) > 4000
-                        else available_transcript
+                        normalized["content_text"][:4000]
+                        if len(normalized["content_text"]) > 4000
+                        else normalized["content_text"]
                     )
                     with st.spinner("퀴즈를 생성 중..."):
                         quiz, prompt = generate_quiz_with_checks(
                             quiz_text,
                             num_questions,
-                            level,
+                            normalized["level"],
                             gen_model,
                             debug,
                         )
@@ -6132,6 +6399,24 @@ def render_results_page():
                 except Exception as e:
                     st.error("❌ 퀴즈 생성 실패")
                     st.exception(e)
+            if debug:
+                debug_level = (
+                    selected_record.get("level")
+                    or selected_record.get("cefr_level")
+                    or selected_record.get("target_level")
+                    or DEFAULT_LEVEL
+                )
+                debug_record_id = (
+                    selected_record.get("id")
+                    or selected_record.get("record_id")
+                    or selected_record.get("timestamp")
+                )
+                with st.expander("🔍 DEBUG: Progress Quiz Input", expanded=False):
+                    st.write(f"records_count={len(record_ids)}")
+                    st.write(f"record_id={debug_record_id}")
+                    st.write(f"level={debug_level}")
+                    st.write(f"source={current_source}")
+                    st.write(f"transcript_preview={available_transcript[:80]}")
 
         # 퀴즈 표시 및 답안 입력
         quiz = st.session_state.get("quiz")
@@ -6357,7 +6642,7 @@ def render_results_page():
                 content = item.get("content", {})
                 question = content.get("question", "문제 없음")[:100]
                 category = item.get("category", "unknown")
-                level = item.get("level", 0)
+                item_level = item.get("level", 0)
                 cat_info = CEFR_CATEGORIES.get(
                     category, {"icon": "📌", "name": category}
                 )
@@ -6366,7 +6651,9 @@ def render_results_page():
                     f"{cat_info['icon']} {question}...", expanded=(i == 0)
                 ):
                     st.markdown(f"**카테고리:** {cat_info['name']}")
-                    st.markdown(f"**레벨:** {'⭐' * (level + 1)} ({level}/6)")
+                    st.markdown(
+                        f"**레벨:** {'⭐' * (item_level + 1)} ({item_level}/6)"
+                    )
                     st.markdown(f"**복습 횟수:** {item.get('review_count', 0)}회")
 
                     if content.get("evidence_quote"):
